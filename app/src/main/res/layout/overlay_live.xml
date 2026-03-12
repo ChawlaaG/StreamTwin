@@ -1,0 +1,255 @@
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content">
+
+    <!-- BUBBLE MODE (Minimized) -->
+    <RelativeLayout
+        android:id="@+id/bubbleContainer"
+        android:layout_width="60dp"
+        android:layout_height="60dp"
+        android:visibility="visible">
+
+        <ImageView
+            android:id="@+id/bubbleIcon"
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:src="@drawable/bg_purple_circle"
+            android:background="@android:color/transparent"
+            android:padding="4dp" />
+
+        <ImageView
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:src="@drawable/ic_chat"
+            android:layout_centerInParent="true"
+            android:tint="#FFFFFF" />
+
+        <TextView
+            android:id="@+id/unreadBadge"
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:layout_alignParentTop="true"
+            android:layout_alignParentEnd="true"
+            android:background="@drawable/bg_red_circle"
+            android:gravity="center"
+            android:text="0"
+            android:textColor="#FFFFFF"
+            android:textSize="10sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
+    </RelativeLayout>
+
+    <!-- CHAT POPUP (Temporary visibility for bubble mode) -->
+    <LinearLayout
+        android:id="@+id/chatPopup"
+        android:layout_width="200dp"
+        android:layout_height="wrap_content"
+        android:background="@drawable/bg_overlay_glass"
+        android:elevation="41dp"
+        android:orientation="vertical"
+        android:padding="8dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/popupSender"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#9146FF"
+            android:textSize="11sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/popupMessage"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:maxLines="2"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <!-- EXPANDED MODE (Dashboard + Chat) -->
+    <LinearLayout
+        android:id="@+id/expandedRoot"
+        android:layout_width="280dp"
+        android:layout_height="420dp"
+        android:background="@drawable/bg_overlay_glass"
+        android:orientation="vertical"
+        android:padding="8dp"
+        android:visibility="gone">
+
+        <!-- Top Bar: Stats -->
+        <RelativeLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingBottom="8dp">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+                
+                <TextView
+                    android:id="@+id/overlayStreamTitle"
+                    android:layout_width="200dp"
+                    android:layout_height="wrap_content"
+                    android:text="My Awesome Stream"
+                    android:textColor="#FFFFFF"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:ellipsize="end"
+                    android:singleLine="true"/>
+
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:layout_marginTop="2dp">
+                    
+                    <ImageView
+                        android:layout_width="12dp"
+                        android:layout_height="12dp"
+                        android:src="@drawable/ic_viewers"
+                        android:tint="#FFFFFF"/>
+                    <TextView
+                        android:id="@+id/viewerCount"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="0"
+                        android:textColor="#FFFFFF"
+                        android:textSize="11sp"
+                        android:layout_marginStart="4dp"/>
+
+                    <ImageView
+                        android:layout_width="12dp"
+                        android:layout_height="12dp"
+                        android:src="@drawable/ic_battery"
+                        android:tint="#FFFFFF"
+                        android:layout_marginStart="12dp"/>
+                    <TextView
+                        android:id="@+id/batteryText"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="100%"
+                        android:textColor="#FFFFFF"
+                        android:textSize="11sp"
+                        android:layout_marginStart="4dp"/>
+
+                    <ImageView
+                        android:layout_width="12dp"
+                        android:layout_height="12dp"
+                        android:src="@drawable/ic_signal"
+                        android:tint="#FFFFFF"
+                        android:layout_marginStart="12dp"/>
+                    <TextView
+                        android:id="@+id/overlayBitrateText"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="0 kbps"
+                        android:textColor="#FFFFFF"
+                        android:textSize="11sp"
+                        android:layout_marginStart="4dp"/>
+                </LinearLayout>
+            </LinearLayout>
+
+            <ImageView
+                android:id="@+id/minimizeButton"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:layout_alignParentEnd="true"
+                android:padding="4dp"
+                android:src="@drawable/ic_minimize"
+                android:tint="#FFFFFF" />
+        </RelativeLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#22FFFFFF" />
+
+        <!-- Chat Area -->
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/chatRecyclerView"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:layout_marginTop="4dp" />
+
+        <!-- Quick Actions -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/quickEditButton"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_purple_pill"
+                android:text="Edit Title"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                android:textAllCaps="false"/>
+
+            <Button
+                android:id="@+id/clipButton"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/bg_purple_pill"
+                android:text="Clip 60s"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                android:textAllCaps="false"/>
+
+            <ImageView
+                android:id="@+id/btnOverlayMic"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/bg_purple_pill"
+                android:padding="8dp"
+                android:src="@drawable/ic_mic"
+                android:tint="#FFFFFF" />
+
+            <ImageView
+                android:id="@+id/overlayStopButton"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/bg_red_circle"
+                android:padding="8dp"
+                android:src="@drawable/ic_close"
+                android:tint="#FFFFFF" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+            
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Transparency"
+                android:textColor="#BBFFFFFF"
+                android:textSize="10sp" />
+
+            <SeekBar
+                android:id="@+id/transparencySeekBar"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="100"
+                android:progress="80"
+                android:progressTint="#FFFFFF"
+                android:thumbTint="#FFFFFF" />
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>

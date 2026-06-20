@@ -1,116 +1,125 @@
 package com.streamtwin.ui.splash
 
-import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.FlashOn
+import androidx.compose.material.icons.outlined.Sensors
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import android.Manifest
+import android.os.Build
+import android.provider.Settings
+import com.google.accompanist.permissions.ExperimentalPermissionsApi
+import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.em
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.streamtwin.ui.theme.*
 import kotlinx.coroutines.delay
 
+@OptIn(ExperimentalPermissionsApi::class)
 @Composable
 fun SplashScreen(
     onNavigateToHome: () -> Unit,
     onNavigateToConnect: () -> Unit,
+    onNavigateToPermissionsFromSplash: (String) -> Unit,
     viewModel: SplashViewModel = hiltViewModel()
 ) {
-    val hasToken by viewModel.hasToken.collectAsState()
+    val shouldSkipConnect by viewModel.shouldSkipConnect.collectAsState()
 
-    // ── entrance animations ──
-    var visible by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        visible = true
-        delay(1500)
-        if (hasToken) onNavigateToHome() else onNavigateToConnect()
+    val context = LocalContext.current
+    
+    val permissionsList = mutableListOf(Manifest.permission.RECORD_AUDIO)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        permissionsList.add(Manifest.permission.POST_NOTIFICATIONS)
     }
+    if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) {
+        permissionsList.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+    }
+    val permissionsState = rememberMultiplePermissionsState(permissions = permissionsList)
+    val hasOverlay = Settings.canDrawOverlays(context)
 
-    val animatedAlpha by animateFloatAsState(
-        targetValue = if (visible) 1f else 0f,
-        animationSpec = tween(durationMillis = 800, easing = EaseOutCubic)
-    )
-    val animatedScale by animateFloatAsState(
-        targetValue = if (visible) 1f else 0.7f,
-        animationSpec = tween(durationMillis = 900, easing = EaseOutBack)
-    )
-    val taglineAlpha by animateFloatAsState(
-        targetValue = if (visible) 1f else 0f,
-        animationSpec = tween(durationMillis = 700, delayMillis = 400, easing = EaseOutCubic)
-    )
-
-    // Pulsing glow behind the icon
-    val infiniteTransition = rememberInfiniteTransition()
-    val glowScale by infiniteTransition.animateFloat(
-        initialValue = 1f,
-        targetValue = 1.2f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1500, easing = EaseInOutSine),
-            repeatMode = RepeatMode.Reverse
-        )
-    )
-
-    val backgroundGradient = Brush.linearGradient(
-        colors = listOf(TwitchPurpleDark, DarkBackground, DarkBackground),
-        start = Offset(0f, 0f),
-        end = Offset(Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY)
-    )
+    LaunchedEffect(Unit) {
+        delay(1500)
+        if (!permissionsState.allPermissionsGranted || !hasOverlay) {
+            onNavigateToPermissionsFromSplash("permissions")
+        } else {
+            onNavigateToHome()
+        }
+    }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(backgroundGradient),
-        contentAlignment = Alignment.Center
+            .background(SurfaceContainerLowest)
     ) {
+        // Center Content
         Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier
-                .scale(animatedScale)
-                .alpha(animatedAlpha)
+            modifier = Modifier.align(Alignment.Center),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Glow ring behind icon
-            Box(contentAlignment = Alignment.Center) {
-                Box(
-                    modifier = Modifier
-                        .size(80.dp)
-                        .scale(glowScale)
-                        .background(TwitchPurpleGlow, shape = androidx.compose.foundation.shape.CircleShape)
-                )
+            Box(
+                modifier = Modifier
+                    .size(80.dp)
+                    .background(SurfaceContainerHigh, RoundedCornerShape(16.dp)),
+                contentAlignment = Alignment.Center
+            ) {
                 Icon(
-                    imageVector = Icons.Default.FlashOn,
-                    contentDescription = null,
-                    tint = TwitchPurple,
-                    modifier = Modifier.size(48.dp)
+                    imageVector = Icons.Outlined.Sensors,
+                    contentDescription = "StreamTwin Logo",
+                    tint = Primary,
+                    modifier = Modifier.size(40.dp)
                 )
             }
             Spacer(modifier = Modifier.height(24.dp))
             Text(
-                text = "StreamTwin",
-                style = MaterialTheme.typography.displaySmall.copy(
-                    fontWeight = FontWeight.ExtraBold,
-                    color = TextPrimary
-                )
+                text = "STREAMTWIN",
+                fontFamily = Manrope,
+                fontWeight = FontWeight.Black,
+                fontSize = 36.sp,
+                color = Primary,
+                letterSpacing = 0.25.em
             )
             Spacer(modifier = Modifier.height(12.dp))
             Text(
-                text = "Stream smarter. Not harder.",
-                style = MaterialTheme.typography.bodyMedium.copy(
-                    color = TextSecondary,
-                    fontSize = 15.sp
-                ),
-                modifier = Modifier.alpha(taglineAlpha)
+                text = "STREAM EVERYWHERE. AT ONCE.",
+                fontFamily = Inter,
+                fontSize = 13.sp,
+                color = OnSurfaceVariant.copy(alpha = 0.6f),
+                letterSpacing = 0.15.em
+            )
+        }
+
+        // Bottom Loading Content
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 80.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .width(140.dp)
+                    .height(2.dp),
+                color = Primary,
+                trackColor = Primary.copy(alpha = 0.1f)
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "INITIALIZING CORE",
+                fontFamily = Inter,
+                fontSize = 10.sp,
+                color = OnSurfaceVariant.copy(alpha = 0.4f),
+                letterSpacing = 0.1.em
             )
         }
     }

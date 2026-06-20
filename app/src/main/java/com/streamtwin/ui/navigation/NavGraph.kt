@@ -1,6 +1,8 @@
 package com.streamtwin.ui.navigation
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -16,6 +18,8 @@ sealed class Screen(val route: String) {
     object Home : Screen("home")
     object Settings : Screen("settings")
     object Live : Screen("live")
+    object Vault : Screen("vault")
+    object Permissions : Screen("permissions")
 }
 
 @Composable
@@ -38,25 +42,57 @@ fun NavGraph(
                     navController.navigate(Screen.Connect.route) {
                         popUpTo(Screen.Splash.route) { inclusive = true }
                     }
+                },
+                onNavigateToPermissionsFromSplash = { targetRoute ->
+                    // Instead of passing target route as argument, we just navigate to Permissions.
+                    // PermissionsScreen will figure out where to go next based on auth state.
+                    navController.navigate(Screen.Permissions.route) {
+                        popUpTo(Screen.Splash.route) { inclusive = true }
+                    }
+                }
+            )
+        }
+        composable(Screen.Permissions.route) {
+            com.streamtwin.ui.permissions.PermissionsScreen(
+                onAllPermissionsGranted = {
+                    navController.navigate(Screen.Home.route) {
+                        popUpTo(Screen.Permissions.route) { inclusive = true }
+                    }
                 }
             )
         }
         composable(Screen.Connect.route) {
             ConnectScreen(
                 onAuthSuccess = {
-                    navController.navigate(Screen.Home.route) {
+                    navController.navigate(Screen.Home.route + "?startMode=STREAMING") {
                         popUpTo(Screen.Connect.route) { inclusive = true }
                     }
                 }
             )
         }
-        composable(Screen.Home.route) {
+        composable(
+            route = Screen.Home.route + "?startMode={startMode}",
+            arguments = listOf(androidx.navigation.navArgument("startMode") { nullable = true; defaultValue = null })
+        ) { backStackEntry ->
+            val startMode = backStackEntry.arguments?.getString("startMode")
             HomeScreen(
+                startMode = startMode,
                 onNavigateToSettings = {
                     navController.navigate(Screen.Settings.route)
                 },
                 onNavigateToLive = {
                     navController.navigate(Screen.Live.route)
+                },
+                onNavigateToVault = {
+                    navController.navigate(Screen.Vault.route)
+                },
+                onNavigateToConnect = {
+                    navController.navigate(Screen.Connect.route)
+                },
+                onPermissionsRevoked = {
+                    navController.navigate(Screen.Permissions.route) {
+                        popUpTo(Screen.Home.route) { inclusive = true }
+                    }
                 }
             )
         }
@@ -76,6 +112,15 @@ fun NavGraph(
             LiveScreen(
                 onStreamEnded = {
                     navController.popBackStack()
+                }
+            )
+        }
+        composable(Screen.Vault.route) {
+            com.streamtwin.ui.vault.VaultScreen(
+                onNavigateToHome = {
+                    navController.navigate(Screen.Home.route) {
+                        popUpTo(Screen.Home.route) { inclusive = true }
+                    }
                 }
             )
         }

@@ -5,8 +5,10 @@
     <!-- BUBBLE MODE (Minimized) -->
     <RelativeLayout
         android:id="@+id/bubbleContainer"
-        android:layout_width="60dp"
-        android:layout_height="60dp"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:minWidth="56dp"
+        android:minHeight="56dp"
         android:visibility="visible">
 
         <ImageView
@@ -18,6 +20,7 @@
             android:padding="4dp" />
 
         <ImageView
+            android:id="@+id/bubbleContentIcon"
             android:layout_width="32dp"
             android:layout_height="32dp"
             android:src="@drawable/ic_chat"
@@ -25,11 +28,28 @@
             android:tint="#FFFFFF" />
 
         <TextView
+            android:id="@+id/startStreamHint"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_toEndOf="@id/bubbleIcon"
+            android:layout_centerVertical="true"
+            android:layout_marginStart="4dp"
+            android:layout_marginEnd="8dp"
+            android:background="@drawable/bg_overlay_glass"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="6dp"
+            android:text="Click to start stream"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
+
+        <TextView
             android:id="@+id/unreadBadge"
             android:layout_width="20dp"
             android:layout_height="20dp"
-            android:layout_alignParentTop="true"
-            android:layout_alignParentEnd="true"
+            android:layout_alignTop="@id/bubbleIcon"
+            android:layout_alignEnd="@id/bubbleIcon"
             android:background="@drawable/bg_red_circle"
             android:gravity="center"
             android:text="0"
@@ -99,6 +119,48 @@
                     android:textStyle="bold"
                     android:ellipsize="end"
                     android:singleLine="true"/>
+
+                <LinearLayout
+                    android:id="@+id/connectionStatusDots"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:layout_marginTop="2dp">
+                    
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Status: "
+                        android:textColor="#88FFFFFF"
+                        android:textSize="9sp"
+                        android:layout_marginEnd="4dp"
+                        android:textAllCaps="true"
+                        android:textStyle="bold"/>
+
+                    <View
+                        android:id="@+id/dotTwitch"
+                        android:layout_width="6dp"
+                        android:layout_height="6dp"
+                        android:background="@drawable/bg_dot"
+                        android:backgroundTint="#555555"
+                        android:layout_marginEnd="6dp" />
+                    
+                    <View
+                        android:id="@+id/dotKick"
+                        android:layout_width="6dp"
+                        android:layout_height="6dp"
+                        android:background="@drawable/bg_dot"
+                        android:backgroundTint="#555555"
+                        android:layout_marginEnd="6dp" />
+                    
+                    <View
+                        android:id="@+id/dotYoutube"
+                        android:layout_width="6dp"
+                        android:layout_height="6dp"
+                        android:background="@drawable/bg_dot"
+                        android:backgroundTint="#555555" />
+                </LinearLayout>
 
                 <LinearLayout
                     android:layout_width="wrap_content"
@@ -236,7 +298,55 @@
             android:orientation="horizontal">
             
             <TextView
-                android:layout_width="wrap_content"
+                android:layout_width="65dp"
+                android:layout_height="wrap_content"
+                android:text="Mic Vol"
+                android:textColor="#BBFFFFFF"
+                android:textSize="10sp" />
+
+            <SeekBar
+                android:id="@+id/micVolumeSeekBar"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="100"
+                android:progress="100"
+                android:progressTint="#9146FF"
+                android:thumbTint="#9146FF" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+            
+            <TextView
+                android:layout_width="65dp"
+                android:layout_height="wrap_content"
+                android:text="Game Vol"
+                android:textColor="#BBFFFFFF"
+                android:textSize="10sp" />
+
+            <SeekBar
+                android:id="@+id/gameVolumeSeekBar"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="100"
+                android:progress="100"
+                android:progressTint="#9146FF"
+                android:thumbTint="#9146FF" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+            
+            <TextView
+                android:layout_width="65dp"
                 android:layout_height="wrap_content"
                 android:text="Transparency"
                 android:textColor="#BBFFFFFF"

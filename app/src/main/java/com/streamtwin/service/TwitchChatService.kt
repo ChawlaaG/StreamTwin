@@ -21,6 +21,7 @@ class TwitchChatService : Service() {
     lateinit var securePreferences: StreamTwinSecurePrefs
 
     private val TAG = "TwitchChatService"
+    private val privMsgRegex = Regex("^(?:@([^ ]+) )?:([^ ]+) PRIVMSG #[^ ]+ :(.*)$")
     private var webSocket: WebSocket? = null
     private val client = OkHttpClient()
     private val serviceScope = CoroutineScope(Dispatchers.IO + Job())
@@ -36,11 +37,22 @@ class TwitchChatService : Service() {
         return START_STICKY
     }
 
+    private var isConnecting = false
+    private var channelRequested: String? = null
+    private var reconnectAttempt = 0
+
     private fun connectToChat() {
+        if (isConnecting || webSocket != null) {
+            Log.d(TAG, "connectToChat: Already connected or connecting, skipping.")
+            return
+        }
+        
+        isConnecting = true
         serviceScope.launch {
-            val token = securePreferences.getAccessToken() ?: return@launch
-            val user = repository.getCurrentUser().getOrNull() ?: return@launch
+            val token = securePreferences.getAccessToken() ?: run { isConnecting = false; return@launch }
+            val user = repository.getCurrentUser().getOrNull() ?: run { isConnecting = false; return@launch }
             val channelName = user.login.lowercase()
+            channelRequested = channelName
 
             val request = Request.Builder()
                 .url("wss://irc-ws.chat.twitch.tv:443")
@@ -48,6 +60,8 @@ class TwitchChatService : Service() {
 
             webSocket = client.newWebSocket(request, object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    isConnecting = false
+                    reconnectAttempt = 0
                     Log.d(TAG, "IRC: Connected to WebSocket. Authenticating...")
                     webSocket.send("CAP REQ :twitch.tv/tags twitch.tv/commands")
                     webSocket.send("PASS oauth:$token")
@@ -58,7 +72,12 @@ class TwitchChatService : Service() {
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     Log.v(TAG, "IRC RAWMESSAGE: $text")
-                    handleIrcMessage(text)
+                    // IRC messages can be batched in one frame, separated by CRLF
+                    text.split("\r\n").forEach { line ->
+                        if (line.isNotEmpty()) {
+                            handleIrcMessage(line)
+                        }
+                    }
                 }
 
                 override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -67,9 +86,13 @@ class TwitchChatService : Service() {
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                     Log.e(TAG, "IRC: Failure", t)
-                    // Auto-reconnect after 5 seconds
+                    this@TwitchChatService.webSocket = null
+                    isConnecting = false
+                    reconnectAttempt++
+                    val backoff = minOf((1000 * Math.pow(2.0, reconnectAttempt.toDouble())).toLong(), 60000L)
+                    // Auto-reconnect with exponential backoff (max 60 seconds)
                     serviceScope.launch {
-                        delay(5000)
+                        delay(backoff)
                         connectToChat()
                     }
                 }
@@ -78,23 +101,23 @@ class TwitchChatService : Service() {
     }
 
     private fun handleIrcMessage(rawMessage: String) {
-        if (rawMessage.contains("PRIVMSG")) {
+        val matchResult = privMsgRegex.find(rawMessage)
+        if (matchResult != null) {
             try {
-                // Example with tags: @color=#FFFFFF;display-name=User;... :user!user@user.tmi.twitch.tv PRIVMSG #channel :message
-                val tags = if (rawMessage.startsWith("@")) rawMessage.substringBefore(" :").drop(1) else null
-                val remaining = if (tags != null) rawMessage.substringAfter(" :") else rawMessage.drop(1)
-                
-                val prefix = remaining.substringBefore(" PRIVMSG ")
-                val content = remaining.substringAfter(" PRIVMSG ").substringAfter(" :", "")
+                val tagsStr = matchResult.groups[1]?.value ?: ""
+                val prefix = matchResult.groups[2]?.value ?: ""
+                val content = matchResult.groups[3]?.value ?: ""
                 
                 if (content.isNotEmpty()) {
                     var displayName = prefix.substringBefore("!")
                     
                     // Try to get display-name from tags
-                    tags?.split(";")?.forEach { tag ->
-                        if (tag.startsWith("display-name=")) {
-                            val value = tag.substringAfter("=")
-                            if (value.isNotEmpty()) displayName = value
+                    if (tagsStr.isNotEmpty()) {
+                        tagsStr.split(";").forEach { tag ->
+                            if (tag.startsWith("display-name=")) {
+                                val value = tag.substringAfter("=")
+                                if (value.isNotEmpty()) displayName = value
+                            }
                         }
                     }
                     

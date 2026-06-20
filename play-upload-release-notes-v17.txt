@@ -1,0 +1,6 @@
+New in this update:
+- Auto Clip can show clipping controls when selected games open.
+- Improved permission screens with clear explanations before access is requested.
+- Overlay permission now opens Android settings for StreamTwin where supported.
+- Reduced avoidable background work to help limit device heating.
+- Fixed landscape game clips appearing centered with black bars in vertical output.

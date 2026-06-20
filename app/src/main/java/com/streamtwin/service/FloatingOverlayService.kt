@@ -2,18 +2,86 @@ package com.streamtwin.service
 
 import android.app.Service
 import android.content.Intent
+import android.content.Context
 import android.graphics.PixelFormat
 import android.os.*
+import android.os.PowerManager
+import android.util.Log
 import android.view.*
-import android.widget.*
-import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.recyclerview.widget.RecyclerView
+import android.view.ContextThemeWrapper
+import android.widget.Toast
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.*
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.em
+import androidx.lifecycle.*
+import androidx.savedstate.SavedStateRegistry
+import androidx.savedstate.SavedStateRegistryController
+import androidx.savedstate.SavedStateRegistryOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.streamtwin.R
+import com.streamtwin.data.local.StreamDataStore
+import com.streamtwin.data.clip.ClipRepository
 import com.streamtwin.data.repository.TwitchRepository
+import com.streamtwin.ui.theme.*
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.*
+import androidx.core.content.ContextCompat
 import javax.inject.Inject
-import kotlin.math.abs
+import android.content.pm.ServiceInfo
+import com.streamtwin.MainActivity
+import com.streamtwin.ClipPermissionActivity
+
+enum class OverlayMode { STREAM, CLIP }
+
+class MyLifecycleOwner : SavedStateRegistryOwner, LifecycleOwner, ViewModelStoreOwner {
+    private val lifecycleRegistry = LifecycleRegistry(this)
+    private val savedStateRegistryController = SavedStateRegistryController.create(this)
+    private val store = ViewModelStore()
+
+    override val lifecycle: Lifecycle get() = lifecycleRegistry
+    override val savedStateRegistry: SavedStateRegistry get() = savedStateRegistryController.savedStateRegistry
+    override val viewModelStore: ViewModelStore get() = store
+
+    fun start() {
+        savedStateRegistryController.performRestore(null)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+    }
+
+    fun stop() {
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
+    }
+}
 
 @AndroidEntryPoint
 class FloatingOverlayService : Service() {
@@ -21,38 +89,260 @@ class FloatingOverlayService : Service() {
     @Inject
     lateinit var repository: TwitchRepository
 
-    private lateinit var windowManager: WindowManager
-    private lateinit var overlayView: View
-    private lateinit var params: WindowManager.LayoutParams
-    
-    private var initialX: Int = 0
-    private var initialY: Int = 0
-    private var initialTouchX: Float = 0f
-    private var initialTouchY: Float = 0f
-    
-    private var isExpanded = false
-    private var preExpandX = 0
-    private var preExpandY = 0
-    
-    private var isMicMuted = false
-    
-    private val overlayScope = CoroutineScope(Dispatchers.Main + Job())
-    private var chatPopupJob: Job? = null
-    private var autoCollapseJob: Job? = null
-    private var idleJob: Job? = null
+    @Inject
+    lateinit var dataStore: StreamDataStore
 
-    private lateinit var chatAdapter: ChatAdapter
+    @Inject
+    lateinit var clipRepository: ClipRepository
+
+    private lateinit var windowManager: WindowManager
+    private lateinit var composeView: ComposeView
+    private lateinit var params: WindowManager.LayoutParams
+    private var isViewAdded = false
+    // MutableState so Compose re-renders immediately when mode changes.
+    // Initialized from companion savedMode so that START_STICKY restarts
+    // (which deliver a null intent) preserve CLIP mode without a new intent.
+    private val currentModeState = androidx.compose.runtime.mutableStateOf(savedMode)
+    private var currentMode: OverlayMode
+        get() = currentModeState.value
+        set(value) { 
+            currentModeState.value = value
+            savedMode = value
+            getSharedPreferences("overlay_prefs", Context.MODE_PRIVATE)
+                .edit().putString("saved_mode", value.name).apply()
+        }
+    private var preExpandY: Int? = null
+    private var wakeLock: PowerManager.WakeLock? = null
+    
+    // Lift isExpanded to service level for gesture coordination
+    private val isExpandedState = androidx.compose.runtime.mutableStateOf(false)
+    private var isExpanded: Boolean
+        get() = isExpandedState.value
+        set(value) { isExpandedState.value = value }
+
+    // Interaction states lifted for robust event handling
+    private val lastInteractionMs = androidx.compose.runtime.mutableStateOf(System.currentTimeMillis())
+    private val showSavingFlash = androidx.compose.runtime.mutableStateOf(false)
+    private var isProcessingClick = false
+
+    // ── Drag-to-dismiss (Messenger-style) ──────────────────────────────────
+    // A secondary full-screen transparent overlay that appears only while the
+    // user is dragging the bubble. It shows an X circle at the bottom-center
+    // of the screen. Releasing the bubble over the X dismisses the overlay.
+    private var dismissView: android.widget.FrameLayout? = null
+    private var dismissParams: WindowManager.LayoutParams? = null
+    private var isDismissViewShown = false
+    // Tracks whether the bubble is currently hovering over the X zone
+    private val isOverDismissZone = androidx.compose.runtime.mutableStateOf(false)
+
+    private fun wakeUp() {
+        lastInteractionMs.value = System.currentTimeMillis()
+    }
+
+    /** Shows the bottom-center X dismiss target. Called when drag starts. */
+    private fun showDismissTarget() {
+        if (isDismissViewShown) return
+        try {
+            val layoutFlag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+
+            val dm = resources.displayMetrics
+            val zoneSizePx = (72 * dm.density).toInt()
+
+            val lp = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                zoneSizePx + (48 * dm.density).toInt(), // zone + padding
+                layoutFlag,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                android.graphics.PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                y = 0
+            }
+            dismissParams = lp
+
+            val ctx = android.view.ContextThemeWrapper(this, R.style.Theme_StreamTwin)
+            val frame = android.widget.FrameLayout(ctx)
+            val compDismiss = ComposeView(ctx).apply {
+                setViewTreeLifecycleOwner(lifecycleOwner)
+                setViewTreeSavedStateRegistryOwner(lifecycleOwner)
+                setViewTreeViewModelStoreOwner(lifecycleOwner)
+                setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+                setContent {
+                    val overZone by isOverDismissZone
+                    DismissTargetView(isActive = overZone)
+                }
+            }
+            frame.addView(compDismiss, android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+            ))
+            dismissView = frame
+            windowManager.addView(frame, lp)
+            isDismissViewShown = true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to show dismiss target", e)
+        }
+    }
+
+    /** Hides the X dismiss target. Called when drag ends without dismissing. */
+    private fun hideDismissTarget() {
+        if (!isDismissViewShown) return
+        try {
+            dismissView?.let { windowManager.removeView(it) }
+        } catch (_: Exception) {}
+        dismissView = null
+        isDismissViewShown = false
+        isOverDismissZone.value = false
+    }
+
+    /**
+     * Returns true if the bubble's current position (params.x, params.y) is
+     * over the dismiss X circle at the bottom-center of the screen.
+     * The zone is a 96dp circle centered at (screenW/2, screenH - 80dp).
+     */
+    private fun isOverDismissTarget(): Boolean {
+        val dm = resources.displayMetrics
+        val bubbleCx = params.x + (56 * dm.density / 2)  // bubble center X
+        val bubbleCy = params.y + (56 * dm.density / 2)  // bubble center Y
+        val zoneCx = dm.widthPixels / 2f
+        val zoneCy = dm.heightPixels - (80 * dm.density)
+        val zoneR = 48 * dm.density  // 96dp diameter → 48dp radius
+        val dx = bubbleCx - zoneCx
+        val dy = bubbleCy - zoneCy
+        return (dx * dx + dy * dy) <= (zoneR * zoneR)
+    }
+
+    private fun openClipStarter() {
+        // Launch the transparent trampoline activity so the MediaProjection consent
+        // dialog appears directly over BGMI without switching the user to our app.
+        val intent = Intent(this, ClipPermissionActivity::class.java).apply {
+            addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                Intent.FLAG_ACTIVITY_NO_ANIMATION
+            )
+        }
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to open ClipPermissionActivity", e)
+            Toast.makeText(this, "Open StreamTwin to start clip mode", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private val lifecycleOwner = MyLifecycleOwner()
+    private val overlayScope = CoroutineScope(Dispatchers.Main + Job())
+    // If user requests a clip while the buffer is still warming, queue it and auto-fire when ready
+    private var queuedClipSave = false
+    // Immediately reflects values selected on the main screen to avoid UI lag
+    private val liveClipDuration = kotlinx.coroutines.flow.MutableStateFlow(0)
+    private val liveClipIncludeMic = kotlinx.coroutines.flow.MutableStateFlow<Boolean?>(null)
+
+    companion object {
+        const val TAG = "FloatingOverlay"
+        const val OVERLAY_NOTIF_ID = 1003
+        /**
+         * Persists the overlay mode across in-process START_STICKY restarts.
+         * Reset to STREAM on explicit STOP_OVERLAY so the next session starts fresh.
+         */
+        @Volatile var savedMode: OverlayMode = OverlayMode.STREAM
+    }
 
     override fun onCreate() {
         super.onCreate()
+        
+        // Restore mode from SharedPreferences to survive deep process kills
+        val prefs = getSharedPreferences("overlay_prefs", Context.MODE_PRIVATE)
+        val savedModeStr = prefs.getString("saved_mode", OverlayMode.STREAM.name)
+        savedMode = if (savedModeStr == "CLIP") OverlayMode.CLIP else OverlayMode.STREAM
+        currentModeState.value = savedMode
+        
+        startForegroundService()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-        setupOverlay()
-        startStatsUpdateLoop()
-        observeChat()
+        setupOverlayWithRetry()
+    }
+
+    private fun setupOverlayWithRetry() {
+        if (isViewAdded) return
+        try {
+            setupOverlay()
+        } catch (e: Exception) {
+            Handler(Looper.getMainLooper()).postDelayed({
+                if (!isViewAdded) setupOverlay()
+            }, 500)
+        }
+    }
+
+    private fun startForegroundService() {
+        val channelId = "OverlayServiceChannel"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = android.app.NotificationChannel(
+                channelId, "Overlay Service",
+                android.app.NotificationManager.IMPORTANCE_LOW
+            )
+            val manager = getSystemService(android.app.NotificationManager::class.java)
+            manager.createNotificationChannel(channel)
+        }
+
+        val notification = androidx.core.app.NotificationCompat.Builder(this, channelId)
+            .setContentTitle("StreamTwin Overlay")
+            .setContentText("Overlay is active")
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_LOW)
+            .build()
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(OVERLAY_NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            } else {
+                startForeground(OVERLAY_NOTIF_ID, notification)
+            }
+        } catch (e: Exception) {
+            try { startForeground(OVERLAY_NOTIF_ID, notification) } catch (e2: Exception) {}
+        }
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Only update mode when the intent explicitly provides the OVERLAY_MODE extra.
+        // This prevents the mode from resetting to STREAM on system restarts or
+        // intents that don't carry the extra (e.g. START_STICKY re-delivery).
+        val modeStr = intent?.getStringExtra("OVERLAY_MODE")
+        if (modeStr != null) {
+            currentMode = if (modeStr == "CLIP") OverlayMode.CLIP else OverlayMode.STREAM
+        }
+        // Immediately apply values from intent to skip DataStore propagation delay
+        val clipDur = intent?.getIntExtra("CLIP_DURATION", 0) ?: 0
+        if (clipDur > 0) liveClipDuration.value = clipDur
+        if (intent?.hasExtra("CLIP_MUTE") == true) {
+            liveClipIncludeMic.value = !intent.getBooleanExtra("CLIP_MUTE", false)
+        }
+        
+        if (intent?.action == "STOP_OVERLAY") {
+            savedMode = OverlayMode.STREAM  // Reset so the next clip session starts clean
+            getSharedPreferences("overlay_prefs", Context.MODE_PRIVATE)
+                .edit().putString("saved_mode", OverlayMode.STREAM.name).apply()
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        if (!isViewAdded) setupOverlayWithRetry()
+
+        // If the view was already added but may have been detached by the OS
+        // (common when BGMI reclaims overlay layers under memory pressure),
+        // proactively re-attach it.
+        if (isViewAdded) ensureViewAttached()
+
+        return START_STICKY
     }
 
     private fun setupOverlay() {
-        overlayView = LayoutInflater.from(this).inflate(R.layout.overlay_live, null)
+        if (isViewAdded) return
 
         val layoutFlag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -65,7 +355,11 @@ class FloatingOverlayService : Service() {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             layoutFlag,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            // NOTE: FLAG_KEEP_SCREEN_ON intentionally omitted — it keeps the GPU
+            // display pipeline fully powered at all times and contributes to device
+            // heating. The PARTIAL_WAKE_LOCK in StreamingService keeps the CPU alive.
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -73,430 +367,873 @@ class FloatingOverlayService : Service() {
             y = 300
         }
 
-        windowManager.addView(overlayView, params)
-
-        val bubbleContainer = overlayView.findViewById<View>(R.id.bubbleContainer)
-        bubbleContainer.setOnTouchListener { v, event -> handleTouch(event, v) }
-
-        val minimizeBtn = overlayView.findViewById<View>(R.id.minimizeButton)
-        minimizeBtn.setOnClickListener { toggleMode(false) }
-
-        val stopBtn = overlayView.findViewById<View>(R.id.overlayStopButton)
-        stopBtn.setOnClickListener {
-            showStopConfirmationDialog()
+        if (!android.provider.Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "Overlay Permission Missing", Toast.LENGTH_LONG).show()
+            return
         }
 
-        val micBtn = overlayView.findViewById<ImageView>(R.id.btnOverlayMic)
-        micBtn.setOnClickListener {
-            isMicMuted = !isMicMuted
-            val action = if (isMicMuted) "MUTE_AUDIO" else "UNMUTE_AUDIO"
-            startService(Intent(this, StreamingService::class.java).apply { this.action = action })
-            
-            // Update icon and color
-            if (isMicMuted) {
-                micBtn.setImageResource(R.drawable.ic_mic_off)
-                micBtn.setBackgroundResource(R.drawable.bg_red_circle)
-            } else {
-                micBtn.setImageResource(R.drawable.ic_mic)
-                micBtn.setBackgroundResource(R.drawable.bg_purple_pill)
+        lifecycleOwner.start()
+
+        val gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(e: MotionEvent): Boolean {
+                return true
             }
-        }
 
-        val editBtn = overlayView.findViewById<View>(R.id.quickEditButton)
-        editBtn.setOnClickListener { showEditMetadataDialog() }
-        
-        val clipBtn = overlayView.findViewById<View>(R.id.clipButton)
-        clipBtn.setOnClickListener {
-            val clipIntent = Intent(this, StreamingService::class.java).apply { action = "CREATE_CLIP" }
-            startService(clipIntent)
-            toggleMode(false)
-        }
-
-        val seek = overlayView.findViewById<SeekBar>(R.id.transparencySeekBar)
-        seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
-                overlayView.findViewById<View>(R.id.expandedRoot).alpha = p / 100f
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                if (!isExpanded) {
+                    val isLive = StreamStateManager.isLive.value
+                    if (currentMode == OverlayMode.CLIP && !ClipModeService.isRunning && !clipRepository.isClipModeActive.value) {
+                        Log.d(TAG, "Single tap: Opening clip starter because engine is inactive")
+                        openClipStarter()
+                    } else if (currentMode == OverlayMode.CLIP || isLive) {
+                        isExpanded = true
+                        Log.d(TAG, "Single tap: Expansion ($currentMode, isLive=$isLive)")
+                    } else if (currentMode == OverlayMode.STREAM) {
+                        Log.d(TAG, "Single tap: Starting stream directly")
+                        startService(Intent(this@FloatingOverlayService, StreamingService::class.java).apply { 
+                            action = "START_STREAM_NOW" 
+                        })
+                    }
+                    wakeUp()
+                }
+                return true
             }
-            override fun onStartTrackingTouch(s: SeekBar?) {}
-            override fun onStopTrackingTouch(s: SeekBar?) {}
+
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                if (!isExpanded) {
+                    if (isProcessingClick) {
+                        Log.d(TAG, "Double tap ignored: Processing previous click")
+                        return true
+                    }
+                    isProcessingClick = true
+                    Log.d(TAG, "Double tap detected: Saving clip")
+                    wakeUp()
+                    if (currentMode == OverlayMode.CLIP) {
+                        showSavingFlash.value = true
+                        overlayScope.launch {
+                            delay(1000)
+                            showSavingFlash.value = false
+                        }
+                        ensureViewAttached()
+                        val intent = Intent(this@FloatingOverlayService, ClipModeService::class.java).apply {
+                            action = ClipModeService.ACTION_SAVE_CLIP
+                        }
+                        ContextCompat.startForegroundService(this@FloatingOverlayService, intent)
+                    } else {
+                        // Forward to StreamingService for clip creation (Twitch/YouTube)
+                        startService(Intent(this@FloatingOverlayService, StreamingService::class.java).apply { 
+                            action = "CREATE_CLIP" 
+                        })
+                    }
+                    
+                    // Reset click lock after 500ms
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        isProcessingClick = false
+                    }, 500)
+                    
+                    // Enforce that overlay is still attached after action
+                    ensureViewAttached()
+                }
+                return true
+            }
         })
 
-        setupChatList()
-        resetIdleTimer()
-    }
+        val contextThemeWrapper = ContextThemeWrapper(this, R.style.Theme_StreamTwin)
+        composeView = ComposeView(contextThemeWrapper).apply {
+            setViewTreeLifecycleOwner(lifecycleOwner)
+            setViewTreeSavedStateRegistryOwner(lifecycleOwner)
+            setViewTreeViewModelStoreOwner(lifecycleOwner)
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
 
-    private fun setupChatList() {
-        val recyclerView = overlayView.findViewById<RecyclerView>(R.id.chatRecyclerView)
-        chatAdapter = ChatAdapter()
-        recyclerView.adapter = chatAdapter
-        recyclerView.layoutManager = LinearLayoutManager(this).apply {
-            stackFromEnd = true
-        }
-    }
+            var downX = 0f
+            var downY = 0f
+            var isDragging = false
 
-    private fun observeChat() {
-        overlayScope.launch {
-            ChatStateManager.messages.collect { msg ->
-                chatAdapter.addMessage(msg)
-                if (!isExpanded) {
-                    showChatPopup(msg)
+            setOnTouchListener { v, event ->
+                // Always feed detector first so it can track gesture timing/sequence correctly
+                gestureDetector.onTouchEvent(event)
+
+                // If dashboard is expanded, let Compose handle all internal touches (sliders, etc.)
+                if (isExpanded) return@setOnTouchListener false
+
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        downX = event.rawX
+                        downY = event.rawY
+                        isDragging = false
+                        Log.d(TAG, "Touch DOWN | dragging=false | attached=${parent != null}")
+                        return@setOnTouchListener true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val dx = event.rawX - downX
+                        val dy = event.rawY - downY
+                        val absDx = Math.abs(dx)
+                        val absDy = Math.abs(dy)
+                        if (absDx > 10 || absDy > 10) {
+                            if (!isDragging) {
+                                Log.d(TAG, "Drag threshold reached")
+                                // ── Dismiss zone: only show when user is dragging
+                                // significantly DOWNWARD toward the bottom of the screen.
+                                // This prevents it from popping up during normal relocation
+                                // drags (left/right/up) which is the common case.
+                                // Threshold: moved at least 120px net downward (dy > 120)
+                                // AND the bubble is already in the bottom half of the screen.
+                                val dm = resources.displayMetrics
+                                val inBottomHalf = params.y > dm.heightPixels / 2
+                                val draggingDown = dy > 120
+                                if (draggingDown || inBottomHalf) {
+                                    showDismissTarget()
+                                }
+                            }
+                            isDragging = true
+                            params.x += dx.toInt()
+                            params.y += dy.toInt()
+                            downX = event.rawX
+                            downY = event.rawY
+                            wakeUp()
+                            // Update dismiss zone highlight
+                            isOverDismissZone.value = isDismissViewShown && isOverDismissTarget()
+                            try {
+                                if (parent != null) windowManager.updateViewLayout(v, params)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Layout update failed during drag", e)
+                                ensureViewAttached()
+                            }
+                        }
+                        return@setOnTouchListener true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        Log.d(TAG, "Touch UP | dragging=$isDragging | attached=${parent != null}")
+                        if (isDragging && isDismissViewShown && isOverDismissTarget()) {
+                            // User dragged bubble onto the X — dismiss the overlay
+                            Log.d(TAG, "Released over dismiss zone — stopping overlay service")
+                            hideDismissTarget()
+                            // Stop clip mode too if it's running
+                            if (ClipModeService.isRunning) {
+                                try {
+                                    ContextCompat.startForegroundService(
+                                        this@FloatingOverlayService,
+                                        Intent(this@FloatingOverlayService, ClipModeService::class.java).apply {
+                                            action = ClipModeService.ACTION_STOP
+                                        }
+                                    )
+                                } catch (_: Exception) {}
+                            }
+                            stopSelf()
+                        } else if (isDragging) {
+                            hideDismissTarget()
+                        }
+                        return@setOnTouchListener true
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        // Touch cancelled (e.g. by another window) — always hide zone
+                        hideDismissTarget()
+                        return@setOnTouchListener true
+                    }
+                }
+                false
+            }
+
+            setContent {
+                StreamTwinTheme {
+                    // Observe reactive state
+                    val mode by currentModeState
+                    val expanded by isExpandedState
+                    val lastInteraction by lastInteractionMs
+                    val savingFlash by showSavingFlash
+                    val clipDurationFromStore by dataStore.clipDurationFlow.collectAsState(initial = 60)
+                    val clipDurationLive by liveClipDuration.collectAsState()
+                    val clipDuration = if (clipDurationLive > 0) clipDurationLive else clipDurationFromStore
+                    
+                    val clipIncludeMicFromStore by dataStore.clipIncludeMicFlow.collectAsState(initial = true)
+                    val liveIncludeMic by liveClipIncludeMic.collectAsState()
+                    val clipIncludeMic = liveIncludeMic ?: clipIncludeMicFromStore
+
+                    val overlayClipActive by clipRepository.isClipModeActive.collectAsState(initial = false)
+                    val overlayClipReady by clipRepository.clipReady.collectAsState(initial = false)
+
+                    LiveOverlayPanel(
+                        isExpanded = expanded,
+                        lastInteractionMs = lastInteraction,
+                        savingFlash = savingFlash,
+                        onDrag = { dx, dy ->
+                            params.x += dx.toInt()
+                            params.y += dy.toInt()
+                            try { windowManager.updateViewLayout(this, params) } catch (e: Exception) {}
+                        },
+                        onFocusChange = { focused ->
+                            if (focused) {
+                                params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+                            } else {
+                                params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            }
+                            try { windowManager.updateViewLayout(this, params) } catch (e: Exception) {}
+                        },
+                        onExpandToggled = { expanded ->
+                            isExpanded = expanded
+                            if (expanded) {
+                                preExpandY = params.y
+                                val metrics = resources.displayMetrics
+                                val panelHeightPx = android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_DIP, 440f, metrics)
+                                if (params.y + panelHeightPx > metrics.heightPixels) {
+                                    params.y = (metrics.heightPixels - panelHeightPx).toInt()
+                                    try { windowManager.updateViewLayout(this, params) } catch(e: Exception) {}
+                                }
+                            } else {
+                                preExpandY?.let { oldY ->
+                                    params.y = oldY
+                                    try { windowManager.updateViewLayout(this, params) } catch(e: Exception) {}
+                                    preExpandY = null
+                                }
+                            }
+                        },
+                        onStartStream = {
+                            // CRITICAL GUARD: Never forward streaming commands while in clip mode
+                            if (currentMode != OverlayMode.CLIP) {
+                                startService(Intent(this@FloatingOverlayService, StreamingService::class.java).apply { action = "START_STREAM_NOW" })
+                            } else {
+                                Log.d(TAG, "onStartStream ignored: currently in CLIP mode")
+                            }
+                        },
+                        onStopStream = {
+                            // CRITICAL GUARD: Never forward streaming commands while in clip mode
+                            if (currentMode != OverlayMode.CLIP) {
+                                startService(Intent(this@FloatingOverlayService, StreamingService::class.java).apply { action = "STOP_STREAM" })
+                            } else {
+                                Log.d(TAG, "onStopStream ignored: currently in CLIP mode")
+                            }
+                        },
+                        onAction = { action, value ->
+                            if (action == "SAVE_CLIP") {
+                                showSavingFlash.value = true
+                                overlayScope.launch {
+                                    delay(1000)
+                                    showSavingFlash.value = false
+                                }
+                                // At this point clipActive was already verified by onDoubleTap.
+                                // Always forward the intent to ClipModeService — it handles
+                                // service itself when it wasn't running yet (clipRepository.queuedSave).
+                                ensureViewAttached()
+                                val intent = Intent(this@FloatingOverlayService, ClipModeService::class.java).apply {
+                                    this.action = ClipModeService.ACTION_SAVE_CLIP
+                                }
+                                ContextCompat.startForegroundService(this@FloatingOverlayService, intent)
+                            } else if (action == "STOP_CLIP_MODE") {
+                                val intent = Intent(this@FloatingOverlayService, ClipModeService::class.java).apply {
+                                    this.action = ClipModeService.ACTION_STOP
+                                }
+                                ContextCompat.startForegroundService(this@FloatingOverlayService, intent)
+                            } else if (action == "SET_CLIP_MUTE") {
+                                val isMuted = value == 1f
+                                val intent = Intent(this@FloatingOverlayService, ClipModeService::class.java).apply {
+                                    this.action = ClipModeService.ACTION_SET_MUTE
+                                    putExtra(ClipModeService.EXTRA_MUTE, isMuted)
+                                }
+                                ContextCompat.startForegroundService(this@FloatingOverlayService, intent)
+                            } else {
+                                val intent = Intent(this@FloatingOverlayService, StreamingService::class.java).apply { 
+                                    this.action = action 
+                                    if (value != null) {
+                                        putExtra("VOLUME", value)
+                                    }
+                                }
+                                startService(intent)
+                            }
+                        },
+                        clipActive = overlayClipActive,
+                        clipReady = overlayClipReady,
+                        mode = mode,
+                        clipDuration = clipDuration,
+                        onSetClipDuration = { dur ->
+                            liveClipDuration.value = dur  // instant UI update
+                            overlayScope.launch { dataStore.saveClipDuration(dur) }
+                            ContextCompat.startForegroundService(this@FloatingOverlayService, Intent(this@FloatingOverlayService, ClipModeService::class.java).apply {
+                                action = ClipModeService.ACTION_UPDATE_DURATION
+                                putExtra(ClipModeService.EXTRA_CLIP_DURATION, dur)
+                            })
+                        },
+                        clipIncludeMic = clipIncludeMic,
+                        onSetClipIncludeMic = { include ->
+                            liveClipIncludeMic.value = include
+                            overlayScope.launch { dataStore.saveClipIncludeMic(include) }
+                            ContextCompat.startForegroundService(this@FloatingOverlayService, Intent(this@FloatingOverlayService, ClipModeService::class.java).apply {
+                                action = ClipModeService.ACTION_SET_MUTE
+                                putExtra(ClipModeService.EXTRA_MUTE, !include)
+                            })
+                        }
+                    )
                 }
             }
         }
-        
+
+        windowManager.addView(composeView, params)
+        isViewAdded = true
+
+        // ── Overlay heartbeat ─────────────────────────────────────────────────
+        // Games like BGMI (Unreal Engine) can cause the overlay window to detach
+        // under memory pressure even though the service is still alive.
+        // Proactively re-attach every 5 seconds so the bubble never disappears.
         overlayScope.launch {
-            ChatStateManager.unreadCount.collect { count ->
-                updateUnreadBadge(count)
-            }
-        }
-    }
-
-    private fun handleTouch(event: MotionEvent, view: View): Boolean {
-        when (event.action) {
-            MotionEvent.ACTION_DOWN -> {
-                initialX = params.x
-                initialY = params.y
-                initialTouchX = event.rawX
-                initialTouchY = event.rawY
-                wakeBubble()
-                resetAutoCollapse()
-                return true
-            }
-            MotionEvent.ACTION_MOVE -> {
-                params.x = initialX + (event.rawX - initialTouchX).toInt()
-                params.y = initialY + (event.rawY - initialTouchY).toInt()
-                try { windowManager.updateViewLayout(overlayView, params) } catch (e: Exception) {}
-                return true
-            }
-            MotionEvent.ACTION_UP -> {
-                val diffX = abs(event.rawX - initialTouchX)
-                val diffY = abs(event.rawY - initialTouchY)
-                if (diffX < 15 && diffY < 15) {
-                    toggleMode(true)
+            while (true) {
+                delay(5_000)
+                try {
+                    ensureViewAttached()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Heartbeat ensureViewAttached failed", e)
                 }
-                return true
             }
         }
-        return false
+
+        // Monitor clipReady and fire any queued save when the buffer becomes ready.
+        // This covers both saves queued by the overlay (queuedClipSave) and by the
+        // service itself when it wasn't running yet (clipRepository.queuedSave).
+        overlayScope.launch {
+            try {
+                clipRepository.clipReady.collect { ready ->
+                    if (ready && (queuedClipSave || clipRepository.queuedSave.value)) {
+                        queuedClipSave = false
+                        clipRepository.setQueuedSave(false)
+                        val intent = Intent(this@FloatingOverlayService, ClipModeService::class.java).apply {
+                            this.action = ClipModeService.ACTION_SAVE_CLIP
+                        }
+                        ContextCompat.startForegroundService(this@FloatingOverlayService, intent)
+                        Handler(Looper.getMainLooper()).post {
+                            Toast.makeText(this@FloatingOverlayService, "✂️ Saving queued clip…", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            } catch (e: Exception) { /* best-effort */ }
+        }
+
+        // Force a re-layout after a short delay to ensure visibility on some devices
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (isViewAdded) {
+                try {
+                    windowManager.updateViewLayout(composeView, params)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error forcing layout update", e)
+                }
+            }
+        }, 300)
+
+        // Acquire a screen-bright wake lock so the screen doesn't dim/lock
+        acquireWakeLock()
     }
 
-    private fun toggleMode(expand: Boolean) {
-        isExpanded = expand
-        val bubbleContainer = overlayView.findViewById<View>(R.id.bubbleContainer)
-        val expandedRoot = overlayView.findViewById<View>(R.id.expandedRoot)
-
-        if (expand) {
-            idleJob?.cancel()
-            preExpandX = params.x
-            preExpandY = params.y
-            
-            bubbleContainer.alpha = 1.0f
-            bubbleContainer.scaleX = 1.0f
-            bubbleContainer.scaleY = 1.0f
-            bubbleContainer.visibility = View.GONE
-            expandedRoot.visibility = View.VISIBLE
-            ChatStateManager.clearUnread()
-            
-            adjustParamsForExpansion()
-            updateFocusable(true)
-            resetAutoCollapse()
-        } else {
-            autoCollapseJob?.cancel()
-            params.x = preExpandX
-            params.y = preExpandY
-            bubbleContainer.visibility = View.VISIBLE
-            expandedRoot.visibility = View.GONE
-            
-            try { windowManager.updateViewLayout(overlayView, params) } catch (e: Exception) {}
-            updateFocusable(false)
-            resetIdleTimer()
+    private fun acquireWakeLock() {
+        if (wakeLock == null) {
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            // PARTIAL_WAKE_LOCK: keeps the CPU alive so recording/streaming continues
+            // when the screen dims, but lets Android manage display brightness normally.
+            //
+            // SCREEN_BRIGHT_WAKE_LOCK (old): forced the display to stay at maximum
+            // brightness at all times — the display backlight is the biggest single
+            // contributor to battery drain and SoC heat on mobile devices.
+            wakeLock = pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "StreamTwin:OverlayWakeLock"
+            )
+        }
+        if (wakeLock?.isHeld == false) {
+            wakeLock?.acquire(24 * 60 * 60 * 1000L) // up to 24 h
         }
     }
 
-    private fun adjustParamsForExpansion() {
-        val dm = resources.displayMetrics
-        val screenWidth = dm.widthPixels
-        val screenHeight = dm.heightPixels
-        val expandedWidth = (280 * dm.density).toInt()
-        val expandedHeight = (420 * dm.density).toInt()
-
-        if (params.x + expandedWidth > screenWidth) params.x = screenWidth - expandedWidth - 20
-        if (params.y + expandedHeight > screenHeight) params.y = screenHeight - expandedHeight - 20
-        if (params.x < 0) params.x = 20
-        if (params.y < 0) params.y = 20
-
-        try { windowManager.updateViewLayout(overlayView, params) } catch (e: Exception) {}
+    private fun releaseWakeLock() {
+        if (wakeLock?.isHeld == true) wakeLock?.release()
+        wakeLock = null
     }
 
-    private fun updateFocusable(focusable: Boolean) {
-        if (focusable) {
-            params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
-        } else {
-            params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-        }
-        try { windowManager.updateViewLayout(overlayView, params) } catch (e: Exception) {}
-    }
-
-    private fun showChatPopup(message: ChatMessage) {
-        chatPopupJob?.cancel()
-        val popup = overlayView.findViewById<View>(R.id.chatPopup) ?: return
-        val sender = overlayView.findViewById<TextView>(R.id.popupSender)
-        val msgText = overlayView.findViewById<TextView>(R.id.popupMessage)
-
-        sender.text = message.sender
-        msgText.text = message.message
-        
-        val (shiftX, shiftY) = adjustPopupPosition(popup)
-        params.x += shiftX
-        params.y += shiftY
-        
-        popup.visibility = View.VISIBLE
-        
-        try { windowManager.updateViewLayout(overlayView, params) } catch (e: Exception) {}
-
-        chatPopupJob = overlayScope.launch {
-            delay(5000)
-            popup.visibility = View.GONE
-            params.x -= shiftX
-            params.y -= shiftY
-            
-            val bubbleContainer = overlayView.findViewById<View>(R.id.bubbleContainer)
-            val bParams = bubbleContainer.layoutParams as FrameLayout.LayoutParams
-            bParams.setMargins(0, 0, 0, 0)
-            bubbleContainer.layoutParams = bParams
-            
-            try { windowManager.updateViewLayout(overlayView, params) } catch (e: Exception) {}
+    private fun ensureViewAttached() {
+        if (!isViewAdded || composeView.parent == null) {
+            try {
+                if (composeView.parent != null) windowManager.removeView(composeView)
+                windowManager.addView(composeView, params)
+                isViewAdded = true
+                Log.d(TAG, "Overlay view re-attached (was detached or missing)")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to re-attach overlay view", e)
+            }
         }
     }
 
-    private fun adjustPopupPosition(popup: View): Pair<Int, Int> {
-        val dm = resources.displayMetrics
-        val screenWidth = dm.widthPixels
-        val screenHeight = dm.heightPixels
-        val bubbleSize = (60 * dm.density).toInt()
-        val popupWidth = (200 * dm.density).toInt()
-        val defaultChatHeight = (80 * dm.density).toInt()
-        
-        val layoutParams = popup.layoutParams as FrameLayout.LayoutParams
-        val bubbleParams = overlayView.findViewById<View>(R.id.bubbleContainer).layoutParams as FrameLayout.LayoutParams
-        
-        var shiftX = 0
-        var shiftY = 0
-        
-        bubbleParams.gravity = Gravity.TOP or Gravity.START
-        bubbleParams.setMargins(0, 0, 0, 0)
-        
-        if (params.x > screenWidth / 2) {
-            layoutParams.gravity = Gravity.TOP or Gravity.START
-            layoutParams.setMargins(0, 0, 0, 0)
-            val margin = popupWidth + 8
-            bubbleParams.setMargins(margin, 0, 0, 0)
-            shiftX = -margin
-        } else {
-            layoutParams.gravity = Gravity.TOP or Gravity.START
-            layoutParams.setMargins(bubbleSize + 8, 0, 0, 0)
-            bubbleParams.setMargins(0, 0, 0, 0)
-            shiftX = 0
+    override fun onDestroy() {
+        super.onDestroy()
+        // Remove the main overlay view
+        if (isViewAdded) {
+            try {
+                Log.d(TAG, "Cleaning up overlay in onDestroy")
+                if (composeView.parent != null) {
+                    windowManager.removeView(composeView)
+                }
+                isViewAdded = false
+            } catch (e: Exception) {
+                Log.e(TAG, "Error removing view in onDestroy", e)
+            }
         }
-        
-        if (params.y > screenHeight * 0.7) {
-            val currentChatHeight = popup.height.takeIf { it > 0 } ?: defaultChatHeight
-            val marginY = currentChatHeight + 8
-            bubbleParams.topMargin += marginY
-            shiftY = -marginY
-        }
-        
-        overlayView.findViewById<View>(R.id.bubbleContainer).layoutParams = bubbleParams
-        popup.layoutParams = layoutParams
-        
-        return Pair(shiftX, shiftY)
+        // Remove the dismiss X view if it's still showing (e.g. service killed mid-drag)
+        hideDismissTarget()
+        releaseWakeLock()
+        lifecycleOwner.stop()
+        overlayScope.cancel()
     }
+}
 
-    private fun resetAutoCollapse() {
-        if (!isExpanded) return
-        autoCollapseJob?.cancel()
-        autoCollapseJob = overlayScope.launch {
-            delay(15000)
-            toggleMode(false)
-        }
-    }
-
-    private fun wakeBubble() {
-        if (isExpanded) return
-        val bubbleContainer = overlayView.findViewById<View>(R.id.bubbleContainer) ?: return
-        bubbleContainer.alpha = 1.0f
-        bubbleContainer.scaleX = 1.0f
-        bubbleContainer.scaleY = 1.0f
-        resetIdleTimer()
-    }
-
-    private fun resetIdleTimer() {
-        if (isExpanded) return
-        idleJob?.cancel()
-        idleJob = overlayScope.launch {
-            delay(15000)
-            val bubbleContainer = overlayView.findViewById<View>(R.id.bubbleContainer) ?: return@launch
-            bubbleContainer.animate().alpha(0.4f).scaleX(0.7f).scaleY(0.7f).setDuration(500).start()
+@Composable
+fun LiveOverlayPanel(
+    isExpanded: Boolean,
+    lastInteractionMs: Long,
+    savingFlash: Boolean,
+    onDrag: (Float, Float) -> Unit,
+    onFocusChange: (Boolean) -> Unit,
+    onExpandToggled: (Boolean) -> Unit,
+    onStartStream: () -> Unit,
+    onStopStream: () -> Unit,
+    onAction: (String, Float?) -> Unit,
+    // clipActive: service has started recording
+    clipActive: Boolean = false,
+    // clipReady: buffer has keyframes and can produce a clip
+    clipReady: Boolean = false,
+    mode: OverlayMode = OverlayMode.STREAM,
+    clipDuration: Int = 60,
+    onSetClipDuration: (Int) -> Unit = {},
+    clipIncludeMic: Boolean = true,
+    onSetClipIncludeMic: (Boolean) -> Unit = {}
+) {
+    val isLive by StreamStateManager.isLive.collectAsState()
+    val streamTime by StreamStateManager.streamDuration.collectAsState()
+    
+    val messages = remember { androidx.compose.runtime.mutableStateListOf<ChatMessage>() }
+    LaunchedEffect(Unit) {
+        ChatStateManager.messages.collect { msg ->
+            messages.add(msg)
+            if (messages.size > 50) messages.removeAt(0)
         }
     }
 
-    private fun showEditMetadataDialog() {
-        val layoutFlag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        } else {
-            @Suppress("DEPRECATION")
-            WindowManager.LayoutParams.TYPE_PHONE
+    // Wrap everything in a Box so the two AnimatedVisibility blocks
+    // overlap each other (bubble <-> panel) during transitions
+    Box(contentAlignment = Alignment.Center) {
+    
+    var streamMicMuted by remember { mutableStateOf(false) }
+    val effectiveMute = if (mode == OverlayMode.CLIP) !clipIncludeMic else streamMicMuted
+    
+    var isPrivacyMode by remember { mutableStateOf(false) }
+    var micVolume by remember { mutableStateOf(1f) }
+    var gameVolume by remember { mutableStateOf(1f) }
+
+    // ---- Idle fade/shrink logic using lifted state ----
+    var isIdle by remember { mutableStateOf(false) }
+    
+    LaunchedEffect(Unit) {
+        while (true) {
+            // 2000ms resolution is more than sufficient for a 5-second idle timeout.
+            // 500ms (old) polled 4x more often than needed for no visible benefit.
+            delay(2000)
+            isIdle = !isExpanded && (System.currentTimeMillis() - lastInteractionMs > 5_000L)
         }
+    }
 
-        val dialogParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            layoutFlag,
-            WindowManager.LayoutParams.FLAG_DIM_BEHIND or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            dimAmount = 0.6f
-            gravity = Gravity.CENTER
+    // Auto-collapse expanded dashboard after 3s of inactivity
+    LaunchedEffect(isExpanded, lastInteractionMs) {
+        if (isExpanded) {
+            delay(3_000L)
+            if (System.currentTimeMillis() - lastInteractionMs >= 3_000L) {
+                onExpandToggled(false)
+            }
         }
+    }
 
-        val dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_edit_metadata, null)
-        val editTitle = dialogView.findViewById<EditText>(R.id.editStreamTitle)
-        val btnSave = dialogView.findViewById<Button>(R.id.btnSave)
-        val btnCancel = dialogView.findViewById<Button>(R.id.btnCancel)
+    val idleAlpha by animateFloatAsState(
+        targetValue = if (isIdle) 0.35f else 1.0f,
+        animationSpec = tween(800),
+        label = "idleAlpha"
+    )
+    val idleScale by animateFloatAsState(
+        targetValue = if (isIdle) 0.75f else 1.0f,
+        animationSpec = tween(800, easing = FastOutSlowInEasing),
+        label = "idleScale"
+    )
+    // ---------------------------------------------------------------------------
 
-        editTitle.setText(StreamStateManager.streamTitle.value)
+    val formatTime = { time: Long ->
+        val h = java.util.concurrent.TimeUnit.MILLISECONDS.toHours(time)
+        val m = java.util.concurrent.TimeUnit.MILLISECONDS.toMinutes(time) % 60
+        val s = java.util.concurrent.TimeUnit.MILLISECONDS.toSeconds(time) % 60
+        if (h > 0) String.format("%d:%02d:%02d", h, m, s) else String.format("%02d:%02d", m, s)
+    }
+    
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val lastDoubleTapTime = 0L // No longer needed in compose side
 
-        btnCancel.setOnClickListener { try { windowManager.removeView(dialogView) } catch (e: Exception) {} }
+    LaunchedEffect(isExpanded) {
+        onFocusChange(isExpanded)
+    }
+    
+    val listState = rememberLazyListState()
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty() && isExpanded) {
+            listState.scrollToItem(messages.size - 1) // snap, not animated — avoids jank
+        }
+    }
 
-        btnSave.setOnClickListener {
-            val newTitle = editTitle.text.toString()
-            overlayScope.launch {
-                val user = repository.getCurrentUser().getOrNull()
-                if (user != null) {
-                    val result = repository.updateStreamMetadata(user.id, newTitle, null)
-                    if (result.isSuccess) {
-                        StreamStateManager.saveStreamTitle(newTitle)
-                        try { windowManager.removeView(dialogView) } catch (e: Exception) {}
+    // ---- Bubble (collapsed state) ----
+    AnimatedVisibility(
+        visible = !isExpanded,
+        enter = scaleIn(tween(150)) + fadeIn(tween(150)),
+        exit  = scaleOut(tween(120)) + fadeOut(tween(120))
+    ) {
+        Box(
+            modifier = Modifier
+                .size(64.dp)
+                .alpha(idleAlpha)
+                .scale(idleScale)
+                .background(Color.Transparent),
+            contentAlignment = Alignment.Center
+        ) {
+            if (mode == OverlayMode.CLIP && !clipReady) {
+                val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+                val pulseScale by infiniteTransition.animateFloat(
+                    initialValue = 1.0f,
+                    targetValue = 1.3f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(2000),
+                        repeatMode = RepeatMode.Reverse
+                    ),
+                    label = "pulseScale"
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .scale(pulseScale)
+                        .border(2.dp, Primary.copy(alpha = 0.3f), CircleShape)
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .size(56.dp)
+                    .clip(CircleShape)
+                    .background(if (savingFlash) Color.White else SurfaceContainerHighest.copy(alpha = 0.8f))
+                    .border(1.dp, OutlineVariant.copy(alpha = 0.5f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                if (mode == OverlayMode.CLIP) {
+                    Icon(Icons.Filled.ContentCut, contentDescription = null, tint = Primary, modifier = Modifier.size(24.dp))
+                } else if (isLive) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Box(modifier = Modifier.size(8.dp).background(LiveGreen, CircleShape))
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(formatTime(streamTime), fontFamily = JetBrainsMono, fontSize = 10.sp, color = OnSurface, fontWeight = FontWeight.Bold)
+                    }
+                } else {
+                    Icon(Icons.Filled.PlayArrow, contentDescription = "Go Live", tint = Primary, modifier = Modifier.size(24.dp))
+                }
+            }
+            // Status indicator: top-right small dot showing buffer readiness
+            if (mode == OverlayMode.CLIP) {
+                val statusColor = when {
+                    clipReady -> LiveGreen
+                    clipActive -> StandbyAmber
+                    else -> OnSurface.copy(alpha = 0.3f)
+                }
+                Box(modifier = Modifier.align(Alignment.TopEnd).offset(x = 4.dp, y = (-4).dp).size(12.dp).background(statusColor, CircleShape).border(1.dp, OutlineVariant.copy(alpha = 0.5f), CircleShape))
+            }
+        }
+    }
+
+    // ---- Expanded Dashboard ----
+    AnimatedVisibility(
+        visible = isExpanded,
+        enter = slideInVertically(tween(180, easing = FastOutSlowInEasing)) { it / 3 } + fadeIn(tween(180)),
+        exit  = slideOutVertically(tween(140)) { it / 4 } + fadeOut(tween(140))
+    ) {
+        Box(
+            modifier = Modifier
+                .width(280.dp)
+                .height(420.dp)
+                .background(SurfaceContainerHighest.copy(alpha = 0.92f), RoundedCornerShape(20.dp))
+                .border(1.dp, OutlineVariant.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
+                .padding(16.dp)
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                // Header Area
+                Row(
+                    modifier = Modifier.fillMaxWidth().pointerInput(Unit) {
+                        detectDragGestures { change, dragAmount ->
+                            change.consume()
+                            onDrag(dragAmount.x, dragAmount.y)
+                        }
+                    },
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (mode == OverlayMode.CLIP) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(modifier = Modifier.size(8.dp).background(if (clipReady) LiveGreen else Primary, CircleShape))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(if (clipReady) "READY" else "BUFFERING ${clipDuration}s", color = if (clipReady) LiveGreen else Primary, fontFamily = Manrope, fontWeight = FontWeight.ExtraBold, fontSize = 12.sp, letterSpacing = 0.1f.em)
+                        }
+                    } else {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(modifier = Modifier.size(10.dp).background(LiveGreen, CircleShape))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("LIVE", fontFamily = Inter, fontWeight = FontWeight.ExtraBold, fontSize = 14.sp, color = LiveGreen)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(formatTime(streamTime), fontFamily = JetBrainsMono, fontSize = 14.sp, color = OnSurface)
+                        }
+                    }
+                    
+                    IconButton(onClick = { onExpandToggled(false) }, modifier = Modifier.size(24.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "Collapse", tint = OnSurfaceVariant)
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(12.dp))
+                HorizontalDivider(color = OutlineVariant.copy(alpha=0.3f))
+                Spacer(modifier = Modifier.height(8.dp))
+
+                if (mode == OverlayMode.CLIP) {
+                    Column(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        Text("CLIP DURATION", color = OnSurfaceVariant, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            listOf(15, 30, 60, 120).forEach { dur ->
+                                val selected = clipDuration == dur
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(horizontal = 4.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (selected) Primary else SurfaceContainerLow)
+                                        .clickable { onSetClipDuration(dur) }
+                                        .padding(vertical = 12.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("${dur}s", color = if (selected) OnPrimary else OnSurface, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.weight(1f))
+                        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxWidth()) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(Icons.Outlined.ContentCut, contentDescription = null, tint = Primary, modifier = Modifier.size(32.dp))
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text("BUFFERING", color = Primary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
+                } else {
+                    // Unified Chat Area
+                    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                            items(messages) { msg ->
+                                val color = when(msg.platform) {
+                                    "TWITCH" -> TwitchPurple
+                                    "YOUTUBE" -> YouTubeRed
+                                    "KICK" -> KickGreen
+                                    else -> Primary
+                                }
+                                Row(modifier = Modifier.padding(vertical = 4.dp).fillMaxWidth()) {
+                                    Text(msg.sender, color = color, fontFamily = Inter, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(msg.message, color = OnSurface, fontFamily = Inter, fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                    
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Volume Controls
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Mic, contentDescription = "Mic Vol", tint = OnSurfaceVariant, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Slider(
+                            value = micVolume,
+                            onValueChange = { micVolume = it; onAction("SET_MIC_VOLUME", it) },
+                            modifier = Modifier.weight(1f).height(24.dp),
+                            colors = SliderDefaults.colors(thumbColor = Primary, activeTrackColor = Primary)
+                        )
+                    }
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.VolumeUp, contentDescription = "Game Vol", tint = OnSurfaceVariant, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Slider(
+                            value = gameVolume,
+                            onValueChange = { gameVolume = it; onAction("SET_INTERNAL_VOLUME", it) },
+                            modifier = Modifier.weight(1f).height(24.dp),
+                            colors = SliderDefaults.colors(thumbColor = Primary, activeTrackColor = Primary)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+                HorizontalDivider(color = OutlineVariant.copy(alpha=0.3f))
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Footer Actions
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                    if (mode == OverlayMode.CLIP) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable {
+                            onSetClipIncludeMic(!clipIncludeMic)
+                        }) {
+                            Box(modifier = Modifier.size(44.dp).background(if (effectiveMute) ErrorRed.copy(alpha=0.2f) else SurfaceContainerLow, CircleShape), contentAlignment = Alignment.Center) {
+                                Icon(if (effectiveMute) Icons.Default.MicOff else Icons.Default.Mic, contentDescription = "Mic", tint = if (effectiveMute) ErrorRed else OnSurface)
+                            }
+                            Text(if (effectiveMute) "Unmute" else "Mute", color = OnSurfaceVariant, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                         Button(
+                            onClick = { 
+                                onAction("SAVE_CLIP", null)
+                            },
+                            enabled = clipReady,
+                            modifier = Modifier.weight(1f).height(48.dp),
+                            shape = RoundedCornerShape(24.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Primary, contentColor = OnPrimary)
+                        ) {
+                            Icon(Icons.Outlined.ContentCut, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("CLIP IT", fontFamily = Inter, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        IconButton(onClick = { 
+                            onAction("STOP_CLIP_MODE", null)
+                            onExpandToggled(false)
+                        }, modifier = Modifier.size(48.dp).background(SurfaceContainerLow, CircleShape)) {
+                            Icon(Icons.Default.Stop, contentDescription = "Stop", tint = ErrorRed)
+                        }
+                    } else {
+                        // Mic Toggle
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable {
+                            streamMicMuted = !streamMicMuted
+                            onAction(if (streamMicMuted) "MUTE_AUDIO" else "UNMUTE_AUDIO", null)
+                        }) {
+                            Box(modifier = Modifier.size(44.dp).background(if (streamMicMuted) ErrorRed.copy(alpha=0.2f) else SurfaceContainerLow, CircleShape), contentAlignment = Alignment.Center) {
+                                Icon(if (streamMicMuted) Icons.Default.MicOff else Icons.Default.Mic, contentDescription = "Mic", tint = if (streamMicMuted) ErrorRed else OnSurface)
+                            }
+                            Text(if (streamMicMuted) "Unmute" else "Mute", color = OnSurfaceVariant, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
+                        }
+
+                        // Privacy Toggle
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable {
+                            isPrivacyMode = !isPrivacyMode
+                            onAction(if (isPrivacyMode) "ENABLE_PRIVACY" else "DISABLE_PRIVACY", null)
+                        }) {
+                            Box(modifier = Modifier.size(44.dp).background(if (isPrivacyMode) StandbyAmber.copy(alpha=0.2f) else SurfaceContainerLow, CircleShape), contentAlignment = Alignment.Center) {
+                                Icon(if (isPrivacyMode) Icons.Default.VisibilityOff else Icons.Default.Visibility, contentDescription = "Privacy", tint = if (isPrivacyMode) StandbyAmber else OnSurface)
+                            }
+                            Text("Privacy", color = OnSurfaceVariant, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
+                        }
+
+                        // Stop Button
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable { 
+                            onExpandToggled(false)
+                            onStopStream() 
+                        }) {
+                            Box(modifier = Modifier.size(44.dp).background(ErrorRed.copy(alpha=0.2f), CircleShape), contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.Stop, contentDescription = "Stop", tint = ErrorRed)
+                            }
+                            Text("End", color = OnSurfaceVariant, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
+                        }
                     }
                 }
             }
         }
-
-        windowManager.addView(dialogView, dialogParams)
     }
+    } // end Box
+}
 
-    private fun updateUnreadBadge(count: Int) {
-        val badge = overlayView.findViewById<TextView>(R.id.unreadBadge)
-        if (count > 0) {
-            badge.visibility = View.VISIBLE
-            badge.text = if (count > 9) "9+" else count.toString()
-        } else {
-            badge.visibility = View.GONE
-        }
-    }
+/**
+ * The "drop to close" target shown at the bottom-center of the screen while
+ * the floating bubble is being dragged. Inspired by Messenger / YouTube PiP.
+ *
+ * @param isActive  true when the bubble is currently hovering over this target.
+ *                  Changes the appearance from subtle to "danger red" to signal
+ *                  that releasing here will close the overlay.
+ */
+@Composable
+fun DismissTargetView(isActive: Boolean) {
+    val animScale by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (isActive) 1.25f else 1f,
+        animationSpec = androidx.compose.animation.core.spring(
+            dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
+            stiffness = androidx.compose.animation.core.Spring.StiffnessMedium
+        ),
+        label = "dismissScale"
+    )
+    val bgAlpha by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (isActive) 0.95f else 0.65f,
+        animationSpec = androidx.compose.animation.core.tween(150),
+        label = "dismissAlpha"
+    )
 
-    private fun showStopConfirmationDialog() {
-        val layoutFlag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        } else {
-            @Suppress("DEPRECATION")
-            WindowManager.LayoutParams.TYPE_PHONE
-        }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .fillMaxHeight(),
+        contentAlignment = Alignment.BottomCenter
+    ) {
+        // Scrim gradient to make the X zone visible against any background
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight()
+                .background(
+                    androidx.compose.ui.graphics.Brush.verticalGradient(
+                        colors = listOf(
+                            androidx.compose.ui.graphics.Color.Transparent,
+                            androidx.compose.ui.graphics.Color.Black.copy(alpha = if (isActive) 0.55f else 0.30f)
+                        )
+                    )
+                )
+        )
 
-        val dialogParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            layoutFlag,
-            WindowManager.LayoutParams.FLAG_DIM_BEHIND or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            dimAmount = 0.6f
-            gravity = Gravity.CENTER
-        }
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(bottom = 28.dp)
+        ) {
+            // Label
+            Text(
+                text = if (isActive) "Release to close" else "Drag here to close",
+                color = androidx.compose.ui.graphics.Color.White.copy(alpha = bgAlpha),
+                fontSize = 12.sp,
+                fontFamily = Inter,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(bottom = 10.dp)
+            )
 
-        // Programmatic Layout to be safe since we don't know the exact XML of dialog_edit_metadata.
-        
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundResource(R.drawable.bg_overlay_glass)
-            setPadding(64, 64, 64, 64)
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        }
-        
-        val title = TextView(this).apply {
-            text = "End Stream?"
-            setTextColor(android.graphics.Color.WHITE)
-            textSize = 20f
-            setTypeface(null, android.graphics.Typeface.BOLD)
-        }
-        
-        val desc = TextView(this).apply {
-            text = "Are you sure you want to stop streaming?"
-            setTextColor(android.graphics.Color.LTGRAY)
-            textSize = 14f
-            setPadding(0, 16, 0, 48)
-        }
-        
-        val btnRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
-        }
-        
-        val btnCancel = Button(this).apply {
-            text = "Cancel"
-            setBackgroundResource(R.drawable.bg_purple_pill)
-            setTextColor(android.graphics.Color.WHITE)
-            setOnClickListener { try { windowManager.removeView(container) } catch (e: Exception) {} }
-        }
-        
-        val btnConfirm = Button(this).apply {
-            text = "End Stream"
-            setBackgroundResource(R.drawable.bg_red_circle)
-            setTextColor(android.graphics.Color.WHITE)
-            val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-            params.setMargins(16, 0, 0, 0)
-            layoutParams = params
-            setOnClickListener {
-                val stopIntent = Intent(this@FloatingOverlayService, StreamingService::class.java).apply { action = "STOP_STREAM" }
-                startService(stopIntent)
-                try { windowManager.removeView(container) } catch (e: Exception) {}
+            // X circle
+            Box(
+                modifier = Modifier
+                    .size((64 * animScale).dp)
+                    .background(
+                        color = if (isActive)
+                            androidx.compose.ui.graphics.Color(0xFFE53935).copy(alpha = bgAlpha)
+                        else
+                            androidx.compose.ui.graphics.Color.White.copy(alpha = 0.18f),
+                        shape = CircleShape
+                    )
+                    .border(
+                        width = if (isActive) 2.dp else 1.dp,
+                        color = if (isActive)
+                            androidx.compose.ui.graphics.Color(0xFFFF5252)
+                        else
+                            androidx.compose.ui.graphics.Color.White.copy(alpha = 0.45f),
+                        shape = CircleShape
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Close overlay",
+                    tint = androidx.compose.ui.graphics.Color.White,
+                    modifier = Modifier.size(if (isActive) 30.dp else 24.dp)
+                )
             }
         }
-        
-        btnRow.addView(btnCancel)
-        btnRow.addView(btnConfirm)
-        
-        container.addView(title)
-        container.addView(desc)
-        container.addView(btnRow)
-
-        windowManager.addView(container, dialogParams)
-    }
-
-    private fun startStatsUpdateLoop() {
-        overlayScope.launch {
-            while (isActive) {
-                updateStats()
-                delay(5000)
-            }
-        }
-    }
-
-    private fun updateStats() {
-        val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
-        val batteryPct = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-        overlayView.findViewById<TextView>(R.id.batteryText)?.text = "$batteryPct%"
-        overlayView.findViewById<TextView>(R.id.overlayStreamTitle).text = StreamStateManager.streamTitle.value
-        overlayView.findViewById<TextView>(R.id.overlayBitrateText)?.text = "${StreamStateManager.currentBitrate.value} kbps"
-    }
-
-    override fun onBind(intent: Intent?): IBinder? = null
-
-    override fun onDestroy() {
-        overlayScope.cancel()
-        if (::overlayView.isInitialized) {
-            try { windowManager.removeView(overlayView) } catch (e: Exception) {}
-        }
-        super.onDestroy()
     }
 }

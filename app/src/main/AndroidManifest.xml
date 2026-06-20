@@ -8,9 +8,22 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
 
     <application
         android:name=".StreamTwinApp"
@@ -46,19 +59,78 @@
             </intent-filter>
         </activity>
 
-        <!-- Service must include both types for screen + mic capture -->
+        <!--
+            Transparent trampoline that hosts the system MediaProjection consent dialog.
+            Using Theme.Translucent.NoTitleBar ensures no opaque window appears, so the
+            user always sees BGMI (or whatever game triggered the overlay) behind the dialog.
+            noHistory=true prevents it from appearing in the back stack.
+            excludeFromRecents=true keeps it out of the task switcher.
+        -->
+        <activity
+            android:name=".ClipPermissionActivity"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:noHistory="true"
+            android:excludeFromRecents="true" />
+
+        <!-- Service must include mediaProjection for screen capture -->
         <service
             android:name=".service.StreamingService"
-            android:foregroundServiceType="mediaProjection|microphone"
+            android:foregroundServiceType="mediaProjection"
             android:exported="false" />
             
         <service
             android:name=".service.FloatingOverlayService"
-            android:exported="false" />
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_TYPE" android:value="Overlay control for live streaming status and quick actions." />
+        </service>
+
+        <service
+            android:name=".service.AppLaunchMonitorService"
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_TYPE" android:value="Monitor selected foreground apps to show StreamTwin clip controls." />
+        </service>
 
         <service
             android:name=".service.TwitchChatService"
             android:exported="false" />
+            
+        <service
+            android:name=".service.YouTubeChatService"
+            android:exported="false" />
+            
+        <service
+            android:name=".service.UnifiedChatService"
+            android:exported="false" />
+        <service
+            android:name=".service.ClipModeService"
+            android:foregroundServiceType="mediaProjection|microphone"
+            android:exported="false" />
+
+        <receiver
+            android:name=".service.BootReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </receiver>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>

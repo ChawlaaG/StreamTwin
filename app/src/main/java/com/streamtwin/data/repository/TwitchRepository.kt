@@ -88,10 +88,12 @@ class TwitchRepository @Inject constructor(
             val token = securePreferences.getAccessToken() ?: throw Exception("No access token found")
             val authHeader = "Bearer $token"
             val body = mutableMapOf<String, String>()
-            if (title != null) body["title"] = title
-            if (gameId != null) body["game_id"] = gameId
+            if (!title.isNullOrEmpty()) body["title"] = title
+            if (!gameId.isNullOrEmpty()) body["game_id"] = gameId
             
+            android.util.Log.d("TwitchRepository", "updateStreamMetadata: userId=$userId, body=$body")
             val response = apiService.modifyChannelInformation(authHeader, AppConfig.TWITCH_CLIENT_ID, userId, body)
+            android.util.Log.d("TwitchRepository", "updateStreamMetadata: responseCode=${response.code()}, isSuccessful=${response.isSuccessful}")
             if (response.isSuccessful) Result.success(Unit)
             else throw Exception("Update failed: ${response.code()}")
         } catch (e: Exception) {
@@ -104,6 +106,17 @@ class TwitchRepository @Inject constructor(
             val token = securePreferences.getAccessToken() ?: throw Exception("No access token found")
             val authHeader = "Bearer $token"
             val response = apiService.searchCategories(authHeader, AppConfig.TWITCH_CLIENT_ID, query)
+            Result.success(response.data)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getTopGames(): Result<List<TwitchCategory>> = withContext(Dispatchers.IO) {
+        try {
+            val token = securePreferences.getAccessToken() ?: throw Exception("No access token found")
+            val authHeader = "Bearer $token"
+            val response = apiService.getTopGames(authHeader, AppConfig.TWITCH_CLIENT_ID)
             Result.success(response.data)
         } catch (e: Exception) {
             Result.failure(e)

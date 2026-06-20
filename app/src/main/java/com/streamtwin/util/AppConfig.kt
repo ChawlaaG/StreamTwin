@@ -13,4 +13,7 @@ object AppConfig {
     const val AUDIO_BITRATE = 128 * 1024
     const val AUDIO_SAMPLE_RATE = 44100
     const val KEYFRAME_INTERVAL = 2         // seconds
+    
+    // YouTube
+    const val YOUTUBE_CLIENT_ID = "371172582260-5beqsfat33rc3vhqjvl1c7nlr802lgqc.apps.googleusercontent.com"
 }

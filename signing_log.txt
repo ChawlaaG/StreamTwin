@@ -1,0 +1,32 @@
+
+> Task :app:signingReport
+Variant: debug
+Config: debug
+Store: C:\Users\manis\.android\debug.keystore
+Alias: AndroidDebugKey
+MD5: E3:41:AE:8B:C7:45:0C:DC:19:42:F0:B9:F1:5A:34:24
+SHA1: D7:13:3A:EB:D5:AD:BC:C1:54:D1:40:63:44:98:29:6D:A4:13:B7:D7
+SHA-256: 8C:AF:22:9E:F2:FC:B8:4A:FE:F0:17:45:88:E6:9B:83:9B:D8:07:0C:7B:43:6D:9A:FE:AA:52:75:19:45:01:80
+Valid until: Saturday, 14 August, 2055
+----------
+Variant: release
+Config: release
+Store: C:\Users\manis\.gemini\antigravity\scratch\StreamTwin\app\streamtwin_keystore.jks
+Alias: streamtwin
+MD5: BC:1F:AC:0F:4A:62:37:D5:27:AE:30:8F:CC:0F:5B:3B
+SHA1: 76:6B:F9:5F:EA:96:4C:D6:EC:72:AE:34:32:61:C0:2E:EB:1D:D0:97
+SHA-256: C5:84:9B:0A:F8:24:99:6D:DF:99:9A:D5:50:A2:46:20:5B:E3:3E:C2:F3:44:7B:BD:55:32:EB:A8:4A:D9:C7:77
+Valid until: Monday, 28 July, 2053
+----------
+Variant: debugAndroidTest
+Config: debug
+Store: C:\Users\manis\.android\debug.keystore
+Alias: AndroidDebugKey
+MD5: E3:41:AE:8B:C7:45:0C:DC:19:42:F0:B9:F1:5A:34:24
+SHA1: D7:13:3A:EB:D5:AD:BC:C1:54:D1:40:63:44:98:29:6D:A4:13:B7:D7
+SHA-256: 8C:AF:22:9E:F2:FC:B8:4A:FE:F0:17:45:88:E6:9B:83:9B:D8:07:0C:7B:43:6D:9A:FE:AA:52:75:19:45:01:80
+Valid until: Saturday, 14 August, 2055
+----------
+
+BUILD SUCCESSFUL in 690ms
+1 actionable task: 1 executed

@@ -11,14 +11,14 @@ import java.io.FileInputStream
 
 android {
     namespace = "com.streamtwin"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.streamtwin"
         minSdk = 26
-        targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        targetSdk = 35
+        versionCode = 22
+        versionName = "1.2.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -111,13 +111,24 @@ dependencies {
     // Browser (for OAuth)
     implementation("androidx.browser:browser:1.7.0")
     
+    // Google Sign-In (for YouTube OAuth)
+    implementation("com.google.android.gms:play-services-auth:21.0.0")
+    
     // UI Components for Overlay
     implementation("androidx.recyclerview:recyclerview:1.3.2")
 
+    // Image Loading
+    implementation("io.coil-kt:coil-compose:2.6.0")
+
     // RTMP Streaming
     implementation("com.github.pedroSG94.RootEncoder:library:2.6.7")
+    
+    // Google Fonts for Compose
+    implementation("androidx.compose.ui:ui-text-google-fonts:1.6.0")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("io.mockk:mockk:1.13.9")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
     androidTestImplementation(platform("androidx.compose:compose-bom:2024.02.00"))

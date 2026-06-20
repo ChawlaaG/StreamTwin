@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.asStateFlow
 data class ChatMessage(
     val sender: String,
     val message: String,
+    val platform: String = "TWITCH", // "TWITCH", "YOUTUBE", "KICK"
     val timestamp: Long = System.currentTimeMillis()
 )
 
@@ -21,9 +22,9 @@ object ChatStateManager {
     private val _unreadCount = MutableStateFlow(0)
     val unreadCount: StateFlow<Int> = _unreadCount.asStateFlow()
 
-    suspend fun addMessage(sender: String, message: String) {
-        Log.d("ChatStateManager", "New message added: $sender: $message")
-        _messages.emit(ChatMessage(sender, message))
+    suspend fun addMessage(sender: String, message: String, platform: String = "TWITCH") {
+        Log.d("ChatStateManager", "New message added [$platform]: $sender: $message")
+        _messages.emit(ChatMessage(sender, message, platform))
         _unreadCount.value += 1
     }
 

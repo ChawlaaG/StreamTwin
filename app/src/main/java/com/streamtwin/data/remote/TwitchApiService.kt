@@ -29,6 +29,13 @@ interface TwitchApiService {
         @retrofit2.http.Body body: Map<String, String>
     ): retrofit2.Response<Unit>
 
+    @GET("games/top")
+    suspend fun getTopGames(
+        @Header("Authorization") authorization: String,
+        @Header("Client-Id") clientId: String,
+        @Query("first") first: Int = 20
+    ): com.streamtwin.data.remote.model.TwitchCategoriesResponse
+
     @GET("search/categories")
     suspend fun searchCategories(
         @Header("Authorization") authorization: String,

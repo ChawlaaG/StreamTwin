@@ -1,16 +1,20 @@
 package com.streamtwin.service
 
+import android.content.ContentValues
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaMuxer
+import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.util.Log
 import android.widget.Toast
-import com.pedro.library.rtmp.RtmpDisplay
+import com.pedro.library.base.DisplayBase
 import kotlinx.coroutines.*
 import java.io.File
+import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -35,7 +39,7 @@ class ClipManager(
     private val segments = CopyOnWriteArrayList<File>()
     private var rotationJob: Job? = null
     private var isRecording = false
-    private var screenCapture: RtmpDisplay? = null
+    private var screenCapture: DisplayBase? = null
 
     private val segmentsDir: File by lazy {
         File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), "StreamTwinSegments").also {
@@ -49,7 +53,7 @@ class ClipManager(
         }
     }
 
-    fun startContinuousRecording(capture: RtmpDisplay) {
+    fun startContinuousRecording(capture: DisplayBase) {
         if (isRecording) return
         screenCapture = capture
         isRecording = true
@@ -123,21 +127,19 @@ class ClipManager(
         scope.launch(Dispatchers.IO) {
             try {
                 val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-                val outputFile = File(clipsDir, "Clip_$timestamp.mp4")
+                // Use a temporary file for stitching first
+                val tempFile = File(context.cacheDir, "temp_clip_$timestamp.mp4")
 
-                stitchSegments(completedSegments, outputFile)
+                stitchSegments(completedSegments, tempFile)
 
-                android.media.MediaScannerConnection.scanFile(
-                    context,
-                    arrayOf(outputFile.absolutePath),
-                    arrayOf("video/mp4"),
-                    null
-                )
+                val fileName = "Clip_$timestamp.mp4"
+                saveToGallery(tempFile, fileName)
 
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "Clip saved: ${outputFile.name}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "Clip saved: $fileName", Toast.LENGTH_LONG).show()
                 }
-                Log.d(TAG, "Clip saved to ${outputFile.absolutePath}")
+                Log.d(TAG, "Clip saved via MediaStore: $fileName")
+                tempFile.delete()
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to stitch clip", e)
                 withContext(Dispatchers.Main) {
@@ -146,6 +148,44 @@ class ClipManager(
             }
         }
         return true
+    }
+
+    private fun saveToGallery(sourceFile: File, fileName: String) {
+        val resolver = context.contentResolver
+        val videoCollection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        } else {
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        }
+
+        val contentValues = ContentValues().apply {
+            put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
+            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/StreamTwin")
+                put(MediaStore.Video.Media.IS_PENDING, 1)
+            }
+        }
+
+        val videoUri = resolver.insert(videoCollection, contentValues)
+        videoUri?.let { uri ->
+            try {
+                resolver.openOutputStream(uri)?.use { outputStream ->
+                    FileInputStream(sourceFile).use { inputStream ->
+                        inputStream.copyTo(outputStream)
+                    }
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    contentValues.clear()
+                    contentValues.put(MediaStore.Video.Media.IS_PENDING, 0)
+                    resolver.update(uri, contentValues, null, null)
+                }
+                Log.d(TAG, "Successfully saved to gallery: $uri")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error copying clip to gallery", e)
+                resolver.delete(uri, null, null)
+            }
+        } ?: Log.e(TAG, "Failed to create MediaStore entry")
     }
 
     private fun startNewSegment() {
@@ -222,43 +262,58 @@ class ClipManager(
             return
         }
 
+        val muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        var videoMuxerTrackIndex = -1
+        var audioMuxerTrackIndex = -1
+
         // Use the first segment to get the track formats
         val firstExtractor = MediaExtractor()
         firstExtractor.setDataSource(validFiles.first().absolutePath)
 
-        val muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-        val trackIndexMap = mutableMapOf<Int, Int>() // source track index -> muxer track index
-
         for (i in 0 until firstExtractor.trackCount) {
             val format = firstExtractor.getTrackFormat(i)
-            val muxerTrackIndex = muxer.addTrack(format)
-            trackIndexMap[i] = muxerTrackIndex
+            val mime = format.getString(android.media.MediaFormat.KEY_MIME) ?: ""
+            val trackIndex = muxer.addTrack(format)
+            if (mime.startsWith("video/")) {
+                videoMuxerTrackIndex = trackIndex
+            } else if (mime.startsWith("audio/")) {
+                audioMuxerTrackIndex = trackIndex
+            }
         }
 
         muxer.start()
         firstExtractor.release()
 
-        val bufferSize = 1024 * 1024 // 1MB buffer
+        val bufferSize = 2 * 1024 * 1024 // 2MB buffer
         val buffer = ByteBuffer.allocate(bufferSize)
         val bufferInfo = MediaCodec.BufferInfo()
 
-        var timeOffsetUs = 0L
+        var videoTimeOffsetUs = 0L
+        var audioTimeOffsetUs = 0L
 
         for (file in validFiles) {
             val extractor = MediaExtractor()
             try {
                 extractor.setDataSource(file.absolutePath)
 
-                var maxTimestampUs = 0L
+                var currentVideoTrackIndex = -1
+                var currentAudioTrackIndex = -1
 
-                // Process each track in this segment
-                for (trackIndex in 0 until extractor.trackCount) {
-                    if (trackIndexMap.containsKey(trackIndex)) {
-                        extractor.selectTrack(trackIndex)
+                for (i in 0 until extractor.trackCount) {
+                    val format = extractor.getTrackFormat(i)
+                    val mime = format.getString(android.media.MediaFormat.KEY_MIME) ?: ""
+                    if (mime.startsWith("video/")) {
+                        currentVideoTrackIndex = i
+                        if (videoMuxerTrackIndex >= 0) extractor.selectTrack(i)
+                    } else if (mime.startsWith("audio/")) {
+                        currentAudioTrackIndex = i
+                        if (audioMuxerTrackIndex >= 0) extractor.selectTrack(i)
                     }
                 }
 
-                // Read all samples and write to muxer
+                var maxVideoTimestampUs = 0L
+                var maxAudioTimestampUs = 0L
+
                 var sawEOS = false
                 while (!sawEOS) {
                     val trackIndex = extractor.sampleTrackIndex
@@ -267,8 +322,18 @@ class ClipManager(
                         continue
                     }
 
-                    val muxerTrackIdx = trackIndexMap[trackIndex]
-                    if (muxerTrackIdx != null) {
+                    var muxerTrackIdx = -1
+                    var timeOffsetUs = 0L
+
+                    if (trackIndex == currentVideoTrackIndex) {
+                        muxerTrackIdx = videoMuxerTrackIndex
+                        timeOffsetUs = videoTimeOffsetUs
+                    } else if (trackIndex == currentAudioTrackIndex) {
+                        muxerTrackIdx = audioMuxerTrackIndex
+                        timeOffsetUs = audioTimeOffsetUs
+                    }
+
+                    if (muxerTrackIdx >= 0) {
                         buffer.clear()
                         val sampleSize = extractor.readSampleData(buffer, 0)
                         if (sampleSize > 0) {
@@ -279,8 +344,10 @@ class ClipManager(
 
                             muxer.writeSampleData(muxerTrackIdx, buffer, bufferInfo)
 
-                            if (extractor.sampleTime > maxTimestampUs) {
-                                maxTimestampUs = extractor.sampleTime
+                            if (trackIndex == currentVideoTrackIndex) {
+                                maxVideoTimestampUs = maxOf(maxVideoTimestampUs, extractor.sampleTime)
+                            } else if (trackIndex == currentAudioTrackIndex) {
+                                maxAudioTimestampUs = maxOf(maxAudioTimestampUs, extractor.sampleTime)
                             }
                         }
                     }
@@ -291,7 +358,8 @@ class ClipManager(
                 }
 
                 // Offset the next segment's timestamps
-                timeOffsetUs += maxTimestampUs + 33333 // add ~1 frame gap (30fps)
+                videoTimeOffsetUs += maxVideoTimestampUs + 33333 // add ~1 frame gap
+                audioTimeOffsetUs += maxAudioTimestampUs + 23219 // typical AAC frame gap
             } catch (e: Exception) {
                 Log.w(TAG, "Error processing segment: ${file.name}", e)
             } finally {

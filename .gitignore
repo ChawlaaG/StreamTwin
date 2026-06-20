@@ -1,22 +1,26 @@
-*.iml
-.gradle
-/local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
-.DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
-local.properties
+# Dependencies
+node_modules/
+vendor/
+
+# Build output
+dist/
+build/
+.next/
+out/
 
 # Secrets
-keystore.properties
-app/streamtwin_keystore.jks
+.env
+.env.*
+*.env
+.env.local
+.env.production
+.env.development
+config.php
+config.secrets.php
+db.php
+db_connect.php
 
-# App specific
-app/build/
+# OS
+.DS_Store
+Thumbs.db
+*.log

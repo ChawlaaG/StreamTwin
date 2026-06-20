@@ -8,20 +8,18 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
-import androidx.lifecycle.lifecycleScope
 import androidx.navigation.compose.rememberNavController
 import com.streamtwin.ui.navigation.NavGraph
 import com.streamtwin.ui.navigation.Screen
 import com.streamtwin.ui.theme.StreamTwinTheme
 import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.launch
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
-    private var isAuthInProgress = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -37,13 +35,20 @@ class MainActivity : ComponentActivity() {
                     val navController = rememberNavController()
 
                     // Observe auth success to navigate to home
-                    lifecycleScope.launch {
+                    LaunchedEffect(Unit) {
                         viewModel.authSuccess.collect { success ->
-                            if (success && isAuthInProgress) {
-                                isAuthInProgress = false
+                            if (success) {
                                 navController.navigate(Screen.Home.route) {
                                     popUpTo(Screen.Connect.route) { inclusive = true }
                                 }
+                            }
+                        }
+                    }
+
+                    LaunchedEffect(Unit) {
+                        viewModel.startModeRequests.collect { mode ->
+                            navController.navigate(Screen.Home.route + "?startMode=$mode") {
+                                launchSingleTop = true
                             }
                         }
                     }
@@ -61,6 +66,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
+        if (intent?.action == ACTION_START_CLIP_MODE) {
+            viewModel.requestStartMode("CLIPPING_AUTO")
+            return
+        }
+
         val uri = intent?.data ?: return
         
         if (uri.scheme == "https" && uri.host == "localhost") {
@@ -76,9 +86,12 @@ class MainActivity : ComponentActivity() {
             
             val token = params["access_token"]
             if (token != null) {
-                isAuthInProgress = true
                 viewModel.handleTwitchAuthToken(token)
             }
         }
+    }
+
+    companion object {
+        const val ACTION_START_CLIP_MODE = "com.streamtwin.action.START_CLIP_MODE"
     }
 }

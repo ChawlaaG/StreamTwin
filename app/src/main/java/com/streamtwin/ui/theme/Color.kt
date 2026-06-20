@@ -2,42 +2,22 @@ package com.streamtwin.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// ── Core Backgrounds ──
-val DarkBackground = Color(0xFF0E0E12)
-val DarkSurface = Color(0xFF1A1A24)
-val DarkSurfaceElevated = Color(0xFF22222E)
-val DarkSurfaceCard = Color(0xFF1E1E2A)
-
-// ── Brand ──
+val Background = Color(0xFF131315)
+val SurfaceContainerLowest = Color(0xFF0E0E10)
+val SurfaceContainerLow = Color(0xFF1B1B1D)
+val SurfaceContainerHigh = Color(0xFF2A2A2C)
+val SurfaceContainerHighest = Color(0xFF353437)
+val Primary = Color(0xFFBEC2FF)
+val OnPrimary = Color(0xFF000DA4)
+val OnSurface = Color(0xFFE5E1E4)
+val OnSurfaceVariant = Color(0xFFC7C4D8)
+val OutlineVariant = Color(0xFF464555)
+val Outline = Color(0xFF918FA1)
+val LiveGreen = Color(0xFF00E676)
+val StandbyAmber = Color(0xFFFFD600)
+val ErrorRed = Color(0xFFFFB4AB)
+val ErrorContainer = Color(0xFF93000A)
 val TwitchPurple = Color(0xFF9146FF)
-val TwitchPurpleLight = Color(0xFFB380FF)
-val TwitchPurpleDark = Color(0xFF6B2FCF)
-val TwitchPurpleGlow = Color(0x339146FF)
-
-// ── Accent ──
-val AccentRedOrange = Color(0xFFFF4500)
-val AccentOrange = Color(0xFFFF6B35)
-val SuccessGreen = Color(0xFF00E676)
-val WarningYellow = Color(0xFFFFCA28)
-val LiveRed = Color(0xFFFF1744)
-
-// ── Text ──
-val TextPrimary = Color(0xFFEBEBF5)
-val TextSecondary = Color(0xFF8E8EA0)
-val TextMuted = Color(0xFF5A5A6E)
-
-// ── Borders & Dividers ──
-val BorderSubtle = Color(0xFF2A2A38)
-val BorderAccent = Color(0x559146FF)
-val DividerDark = Color(0xFF252535)
-
-// ── Overlay ──
-val GlassWhite = Color(0x14FFFFFF)
-val GlassWhiteStrong = Color(0x22FFFFFF)
-
-// ── Legacy aliases (keep for compatibility) ──
-val PureWhite = Color(0xFFFFFFFF)
-val SurfaceGrey = DarkSurface
-val PrimaryText = TextPrimary
-val SecondaryText = TextSecondary
-val BorderGrey = BorderSubtle
+val YouTubeRed = Color(0xFFFF0000)
+val KickGreen = Color(0xFF53FC18)
+val Secondary = Color(0xFFA6E6FF)

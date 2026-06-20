@@ -1,3 +1,0 @@
-Incremented app version to 16.
-
-Fixes landscape capture for fullscreen games (BGMI): recorded video now honors in-game landscape orientation and scales correctly. Minor stability fixes.

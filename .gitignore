@@ -24,3 +24,18 @@ db_connect.php
 .DS_Store
 Thumbs.db
 *.log
+
+# Android signing keys — NEVER COMMIT
+*.jks
+*.keystore
+keystore.properties
+local.properties
+signing_log.txt
+build_error.txt
+build_log.txt
+build_output*.txt
+logcat_dump.txt
+youtube_response.json
+*.aab
+play-upload*.zip
+play-upload-v*/

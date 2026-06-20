@@ -1,7 +1,0 @@
-Fixed clip orientation and scaling; encoder targets 1080px width.
-Improved virtual display capture to avoid cropping.
-Resolved keyframe/save buffering race conditions.
-Added diagnostic logging for encoder and save pipeline.
-Removed obsolete orientation selector and UI gating.
-Incremented app version to 15.
-Internal testing build — do not upload to Play Store without review.

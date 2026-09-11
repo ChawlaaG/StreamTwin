@@ -11,14 +11,14 @@ import java.io.FileInputStream
 
 android {
     namespace = "com.streamtwin"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.streamtwin"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 22
-        versionName = "1.2.8"
+        targetSdk = 36
+        versionCode = 23
+        versionName = "1.2.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

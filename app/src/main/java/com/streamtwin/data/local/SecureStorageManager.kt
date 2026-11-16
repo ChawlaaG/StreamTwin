@@ -27,7 +27,10 @@ class SecureStorageManager @Inject constructor(
         private const val KICK_STREAM_KEY = "kick_stream_key"
         private const val KICK_RTMP_URL = "kick_rtmp_url"
         private const val YOUTUBE_STREAM_KEY = "youtube_stream_key"
+        private const val YOUTUBE_RTMP_URL = "youtube_rtmp_url"
+        private const val GOOGLE_ACCOUNT_EMAIL = "google_account_email"
         private const val DEFAULT_KICK_URL = "rtmp://fa723fc1b171.global-contribute.live-video.net/app/"
+        private const val DEFAULT_YOUTUBE_URL = "rtmp://a.rtmp.youtube.com/live2"
     }
 
     var kickStreamKey: String
@@ -42,7 +45,19 @@ class SecureStorageManager @Inject constructor(
         get() = sharedPreferences.getString(YOUTUBE_STREAM_KEY, "") ?: ""
         set(value) = sharedPreferences.edit().putString(YOUTUBE_STREAM_KEY, value).apply()
 
+    var youtubeRtmpUrl: String
+        get() = sharedPreferences.getString(YOUTUBE_RTMP_URL, DEFAULT_YOUTUBE_URL) ?: DEFAULT_YOUTUBE_URL
+        set(value) = sharedPreferences.edit().putString(YOUTUBE_RTMP_URL, value).apply()
+
+    var googleAccountEmail: String
+        get() = sharedPreferences.getString(GOOGLE_ACCOUNT_EMAIL, "") ?: ""
+        set(value) = sharedPreferences.edit().putString(GOOGLE_ACCOUNT_EMAIL, value).apply()
+
     var youtubeAccessToken: String
         get() = sharedPreferences.getString("youtube_access_token", "") ?: ""
         set(value) = sharedPreferences.edit().putString("youtube_access_token", value).apply()
+
+    fun clearAll() {
+        sharedPreferences.edit().clear().apply()
+    }
 }

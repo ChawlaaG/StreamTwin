@@ -8,6 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import com.google.android.gms.auth.GoogleAuthUtil
+import com.google.android.gms.auth.UserRecoverableAuthException
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.ApiException
@@ -64,6 +65,33 @@ fun SettingsScreen(
     var showAutoClipApps by remember { mutableStateOf(false) }
     var showUsageAccessRationale by remember { mutableStateOf(false) }
     var hasUsageAccess by remember { mutableStateOf(viewModel.hasUsageAccess()) }
+    var showDeleteConfirmationDialog by remember { mutableStateOf(false) }
+
+    var pendingGoogleAccount by remember { mutableStateOf<android.accounts.Account?>(null) }
+
+    val userRecoverableAuthLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            val acc = pendingGoogleAccount
+            if (acc != null) {
+                scope.launch {
+                    try {
+                        val token = withContext(Dispatchers.IO) {
+                            GoogleAuthUtil.getToken(context, acc, "oauth2:https://www.googleapis.com/auth/youtube.force-ssl")
+                        }
+                        viewModel.handleYouTubeAuthToken(token, acc.name)
+                        android.widget.Toast.makeText(context, "YouTube Connected!", android.widget.Toast.LENGTH_SHORT).show()
+                    } catch (e: Exception) {
+                        android.util.Log.e("SettingsScreen", "Token fetch failed after consent", e)
+                        android.widget.Toast.makeText(context, "Token Error: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        } else {
+            android.widget.Toast.makeText(context, "YouTube permission was not granted.", android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
 
     val googleSignInLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -71,20 +99,41 @@ fun SettingsScreen(
         val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
         try {
             val account = task.getResult(ApiException::class.java)
-            if (account?.account != null) {
+            val gAccount = account?.account ?: (account?.email?.let { android.accounts.Account(it, "com.google") })
+            if (gAccount != null) {
+                pendingGoogleAccount = gAccount
                 scope.launch {
                     try {
                         val token = withContext(Dispatchers.IO) {
-                            GoogleAuthUtil.getToken(context, account.account!!, "oauth2:https://www.googleapis.com/auth/youtube.force-ssl")
+                            GoogleAuthUtil.getToken(context, gAccount, "oauth2:https://www.googleapis.com/auth/youtube.force-ssl")
                         }
-                        viewModel.handleYouTubeAuthToken(token)
+                        viewModel.handleYouTubeAuthToken(token, gAccount.name)
+                        android.widget.Toast.makeText(context, "YouTube Connected!", android.widget.Toast.LENGTH_SHORT).show()
+                    } catch (authEx: UserRecoverableAuthException) {
+                        android.util.Log.i("SettingsScreen", "User consent required for YouTube scope, launching intent", authEx)
+                        val consentIntent = authEx.intent
+                        if (consentIntent != null) {
+                            userRecoverableAuthLauncher.launch(consentIntent)
+                        } else {
+                            android.widget.Toast.makeText(context, "YouTube consent required. Please try signing in again.", android.widget.Toast.LENGTH_LONG).show()
+                        }
                     } catch (e: Exception) {
-                        e.printStackTrace()
+                        android.util.Log.e("SettingsScreen", "Error obtaining YouTube token", e)
+                        android.widget.Toast.makeText(context, "Token Error: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
                     }
                 }
+            } else {
+                android.widget.Toast.makeText(context, "Google Account is null", android.widget.Toast.LENGTH_SHORT).show()
             }
         } catch (e: ApiException) {
-            e.printStackTrace()
+            android.util.Log.e("SettingsScreen", "Google Sign-In failed with status code ${e.statusCode}", e)
+            val friendlyMsg = when (e.statusCode) {
+                10 -> "Sign In Failed (Code 10: Developer Error). Add Play Store App Signing SHA-1 in Google Cloud Console, or enter your YouTube Stream Key below."
+                12500 -> "Sign In Failed (Code 12500). Please check Google Play Services."
+                12501 -> "Sign In cancelled."
+                else -> "Sign In Failed (Code: ${e.statusCode}): ${e.message}"
+            }
+            android.widget.Toast.makeText(context, friendlyMsg, android.widget.Toast.LENGTH_LONG).show()
         }
     }
 
@@ -112,7 +161,11 @@ fun SettingsScreen(
                     webChromeClient = android.webkit.WebChromeClient()
                     webViewClient = object : android.webkit.WebViewClient() {
                         private fun checkAndHandleRedirect(url: String): Boolean {
-                            if (url.startsWith(AppConfig.TWITCH_REDIRECT_URI) || url.startsWith("https://localhost")) {
+                            if (url.startsWith(AppConfig.TWITCH_REDIRECT_URI) ||
+                                url.startsWith("https://localhost") ||
+                                url.startsWith("com.streamtwin://") ||
+                                url.startsWith("streamtwin://")
+                            ) {
                                 val fragment = Uri.parse(url).fragment
                                 val token = fragment?.split("&")?.firstOrNull { it.startsWith("access_token=") }?.substringAfter("=")
                                 if (token != null) {
@@ -313,6 +366,8 @@ fun SettingsScreen(
             val twitchEnabled by viewModel.twitchEnabled.collectAsState(true)
             val kickKey by viewModel.kickStreamKey.collectAsState()
             val kickUrl by viewModel.kickRtmpUrl.collectAsState()
+            val youtubeKey by viewModel.youtubeStreamKey.collectAsState()
+            val youtubeUrl by viewModel.youtubeRtmpUrl.collectAsState()
             val saveSuccess by viewModel.saveSuccess.collectAsState()
 
             val isTwitchConnected = user != null
@@ -367,7 +422,7 @@ fun SettingsScreen(
                     SettingRow(
                         icon = Icons.Outlined.SmartDisplay, "YouTube", YouTubeRed,
                         trailing = {
-                            if (isYoutubeConnected) {
+                            if (isYoutubeConnected || youtubeEnabled) {
                                 Switch(
                                     checked = youtubeEnabled,
                                     onCheckedChange = { 
@@ -382,17 +437,49 @@ fun SettingsScreen(
                                     )
                                 )
                             } else {
-                                ConnectButton(onClick = {
-                                    val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
-                                        .requestEmail()
-                                        .requestScopes(Scope("https://www.googleapis.com/auth/youtube.force-ssl"))
-                                        .build()
-                                    val googleSignInClient = GoogleSignIn.getClient(context, gso)
-                                    googleSignInLauncher.launch(googleSignInClient.signInIntent)
-                                })
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    TextButton(
+                                        onClick = { viewModel.setYoutubeEnabled(true) },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                    ) {
+                                        Text(
+                                            text = "Key",
+                                            fontFamily = Inter,
+                                            fontSize = 12.sp,
+                                            color = OnSurfaceVariant
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    ConnectButton(onClick = {
+                                        val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+                                            .requestEmail()
+                                            .requestScopes(Scope("https://www.googleapis.com/auth/youtube.force-ssl"))
+                                            .build()
+                                        val googleSignInClient = GoogleSignIn.getClient(context, gso)
+                                        googleSignInLauncher.launch(googleSignInClient.signInIntent)
+                                    })
+                                }
                             }
                         }
                     )
+                    if (youtubeEnabled) {
+                        Column(modifier = Modifier.padding(start = 56.dp, end = 16.dp, bottom = 16.dp)) {
+                            SecureTextField(
+                                value = youtubeUrl,
+                                onValueChange = { viewModel.updateYoutubeUrl(it) },
+                                label = "RTMP URL (YouTube)",
+                                placeholder = "rtmp://a.rtmp.youtube.com/live2"
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            SecureTextField(
+                                value = youtubeKey,
+                                onValueChange = { viewModel.updateYoutubeKey(it) },
+                                label = "Stream Key (YouTube)",
+                                placeholder = "xxxx-xxxx-xxxx-xxxx-xxxx",
+                                isPassword = true
+                            )
+                        }
+                    }
 
                     HorizontalDivider(color = OutlineVariant.copy(alpha=0.3f), modifier = Modifier.padding(start = 56.dp))
 
@@ -649,23 +736,103 @@ fun SettingsScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(40.dp))
-            
-            TextButton(
-                onClick = {
-                    viewModel.disconnect()
-                    onSignOut()
-                },
-                modifier = Modifier.align(Alignment.CenterHorizontally)
+            Spacer(modifier = Modifier.height(32.dp))
+
+            // Account & Data Management
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(SurfaceContainerLow, RoundedCornerShape(12.dp))
+                    .border(1.dp, OutlineVariant.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                    .padding(16.dp)
             ) {
                 Text(
-                    "Log Out from StreamTwin",
+                    "ACCOUNT & DATA MANAGEMENT",
                     fontFamily = Inter,
-                    color = ErrorRed,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp
+                    fontSize = 11.sp,
+                    letterSpacing = 0.1.em,
+                    color = OnSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "Disconnect your accounts and wipe all locally stored OAuth tokens, account emails, and RTMP stream keys from this device.",
+                    fontFamily = Inter,
+                    fontSize = 12.sp,
+                    color = OnSurfaceVariant,
+                    lineHeight = 16.sp
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+
+                OutlinedButton(
+                    onClick = { showDeleteConfirmationDialog = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = ErrorRed
+                    ),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, ErrorRed.copy(alpha = 0.6f))
+                ) {
+                    Icon(
+                        Icons.Outlined.DeleteForever,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = ErrorRed
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        "Disconnect Accounts & Delete App Data",
+                        fontFamily = Inter,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp,
+                        color = ErrorRed
+                    )
+                }
+            }
+
+            if (showDeleteConfirmationDialog) {
+                AlertDialog(
+                    onDismissRequest = { showDeleteConfirmationDialog = false },
+                    title = {
+                        Text(
+                            "Disconnect Accounts & Delete App Data?",
+                            fontFamily = Manrope,
+                            fontWeight = FontWeight.Bold,
+                            color = OnSurface
+                        )
+                    },
+                    text = {
+                        Text(
+                            "This will immediately wipe all stored OAuth tokens, connected account emails, and RTMP stream keys from your device's secure storage. This action cannot be undone.",
+                            fontFamily = Inter,
+                            fontSize = 13.sp,
+                            color = OnSurfaceVariant,
+                            lineHeight = 18.sp
+                        )
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                showDeleteConfirmationDialog = false
+                                viewModel.disconnect()
+                                onSignOut()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = ErrorRed),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("Delete Data & Disconnect", fontFamily = Inter, fontWeight = FontWeight.Bold, color = Color.White)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showDeleteConfirmationDialog = false }) {
+                            Text("Cancel", fontFamily = Inter, color = OnSurfaceVariant)
+                        }
+                    },
+                    containerColor = SurfaceContainerHigh,
+                    shape = RoundedCornerShape(12.dp)
                 )
             }
+
             Spacer(modifier = Modifier.height(40.dp))
         }
     }

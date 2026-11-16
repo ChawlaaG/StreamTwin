@@ -42,11 +42,22 @@ class SettingsViewModel @Inject constructor(
 
     val kickStreamKey = MutableStateFlow(secureStorageManager.kickStreamKey)
     val kickRtmpUrl = MutableStateFlow(secureStorageManager.kickRtmpUrl)
+    val youtubeStreamKey = MutableStateFlow(secureStorageManager.youtubeStreamKey)
+    val youtubeRtmpUrl = MutableStateFlow(secureStorageManager.youtubeRtmpUrl)
 
     private val _saveSuccess = MutableStateFlow(false)
     val saveSuccess: StateFlow<Boolean> = _saveSuccess
 
-    val isYoutubeConnected = MutableStateFlow(!secureStorageManager.youtubeAccessToken.isNullOrEmpty())
+    val isYoutubeConnected: StateFlow<Boolean> = combine(
+        youtubeStreamKey,
+        MutableStateFlow(secureStorageManager.youtubeAccessToken)
+    ) { key, token ->
+        key.isNotEmpty() || token.isNotEmpty()
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5000),
+        !secureStorageManager.youtubeAccessToken.isNullOrEmpty() || !secureStorageManager.youtubeStreamKey.isNullOrEmpty()
+    )
 
     val isKickConnected: StateFlow<Boolean> = combine(kickStreamKey, kickRtmpUrl) { key, url ->
         key.isNotEmpty() && url.isNotEmpty()
@@ -80,11 +91,13 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    fun handleYouTubeAuthToken(token: String) {
+    fun handleYouTubeAuthToken(token: String, email: String = "") {
         viewModelScope.launch {
             secureStorageManager.youtubeAccessToken = token
+            if (email.isNotEmpty()) {
+                secureStorageManager.googleAccountEmail = email
+            }
             streamDataStore.saveYoutubeEnabled(true)
-            isYoutubeConnected.value = true
         }
     }
 
@@ -114,10 +127,20 @@ class SettingsViewModel @Inject constructor(
         kickRtmpUrl.value = url
     }
 
+    fun updateYoutubeKey(key: String) {
+        youtubeStreamKey.value = key
+    }
+
+    fun updateYoutubeUrl(url: String) {
+        youtubeRtmpUrl.value = url
+    }
+
     fun saveSettings() {
         viewModelScope.launch {
             secureStorageManager.kickStreamKey = kickStreamKey.value
             secureStorageManager.kickRtmpUrl = kickRtmpUrl.value
+            secureStorageManager.youtubeStreamKey = youtubeStreamKey.value
+            secureStorageManager.youtubeRtmpUrl = youtubeRtmpUrl.value
             _saveSuccess.value = true
             kotlinx.coroutines.delay(2000)
             _saveSuccess.value = false
@@ -126,6 +149,17 @@ class SettingsViewModel @Inject constructor(
 
     fun disconnect() {
         repository.logout()
+        secureStorageManager.clearAll()
+        kickStreamKey.value = ""
+        kickRtmpUrl.value = "rtmp://fa723fc1b171.global-contribute.live-video.net/app/"
+        youtubeStreamKey.value = ""
+        youtubeRtmpUrl.value = "rtmp://a.rtmp.youtube.com/live2"
+        _twitchUser.value = null
+        viewModelScope.launch {
+            streamDataStore.saveTwitchEnabled(false)
+            streamDataStore.saveYoutubeEnabled(false)
+            streamDataStore.saveKickEnabled(false)
+        }
     }
 
     fun setAutoClipEnabled(enabled: Boolean) {

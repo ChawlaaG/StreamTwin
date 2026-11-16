@@ -48,14 +48,17 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- Twitch OAuth redirect -->
-            <intent-filter android:autoVerify="false">
+            <!-- OAuth redirect (Native custom scheme, no http/https web domain required) -->
+            <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="https" />
-                <data android:host="localhost" />
-                <data android:pathPrefix="/streamtwin/callback" />
+                <data
+                    android:scheme="com.streamtwin"
+                    android:host="callback" />
+                <data
+                    android:scheme="streamtwin"
+                    android:host="callback" />
             </intent-filter>
         </activity>
 

@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.em
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.google.android.gms.auth.GoogleAuthUtil
+import com.google.android.gms.auth.UserRecoverableAuthException
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.ApiException
@@ -61,10 +62,40 @@ fun ConnectScreen(
 
     var showTwitchWebView by remember { mutableStateOf(false) }
     var showKickSheet by remember { mutableStateOf(false) }
+    var showYouTubeSheet by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val ytSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     val kickUrl by settingsViewModel.kickRtmpUrl.collectAsState()
     val kickKey by settingsViewModel.kickStreamKey.collectAsState()
+    val youtubeUrl by settingsViewModel.youtubeRtmpUrl.collectAsState()
+    val youtubeKey by settingsViewModel.youtubeStreamKey.collectAsState()
+
+    var pendingGoogleAccount by remember { mutableStateOf<android.accounts.Account?>(null) }
+
+    val userRecoverableAuthLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            val acc = pendingGoogleAccount
+            if (acc != null) {
+                coroutineScope.launch {
+                    try {
+                        val token = withContext(Dispatchers.IO) {
+                            GoogleAuthUtil.getToken(context, acc, "oauth2:https://www.googleapis.com/auth/youtube.force-ssl")
+                        }
+                        mainViewModel.handleYouTubeAuthToken(token, acc.name)
+                        android.widget.Toast.makeText(context, "YouTube Connected!", android.widget.Toast.LENGTH_SHORT).show()
+                    } catch (e: Exception) {
+                        android.util.Log.e("ConnectScreen", "Token fetch failed after consent", e)
+                        android.widget.Toast.makeText(context, "Token Error: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        } else {
+            android.widget.Toast.makeText(context, "YouTube permission was not granted.", android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
 
     val googleSignInLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -72,15 +103,26 @@ fun ConnectScreen(
         val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
         try {
             val account = task.getResult(ApiException::class.java)
-            if (account?.account != null) {
+            val gAccount = account?.account ?: (account?.email?.let { android.accounts.Account(it, "com.google") })
+            if (gAccount != null) {
+                pendingGoogleAccount = gAccount
                 coroutineScope.launch {
                     try {
                         val token = withContext(Dispatchers.IO) {
-                            GoogleAuthUtil.getToken(context, account.account!!, "oauth2:https://www.googleapis.com/auth/youtube.force-ssl")
+                            GoogleAuthUtil.getToken(context, gAccount, "oauth2:https://www.googleapis.com/auth/youtube.force-ssl")
                         }
-                        mainViewModel.handleYouTubeAuthToken(token)
+                        mainViewModel.handleYouTubeAuthToken(token, gAccount.name)
+                        android.widget.Toast.makeText(context, "YouTube Connected!", android.widget.Toast.LENGTH_SHORT).show()
+                    } catch (authEx: UserRecoverableAuthException) {
+                        android.util.Log.i("ConnectScreen", "User consent required for YouTube scope, launching intent", authEx)
+                        val consentIntent = authEx.intent
+                        if (consentIntent != null) {
+                            userRecoverableAuthLauncher.launch(consentIntent)
+                        } else {
+                            android.widget.Toast.makeText(context, "YouTube consent required. Please try signing in again.", android.widget.Toast.LENGTH_LONG).show()
+                        }
                     } catch (e: Exception) {
-                        e.printStackTrace()
+                        android.util.Log.e("ConnectScreen", "Failed to retrieve YouTube token", e)
                         android.widget.Toast.makeText(context, "Token Error: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
                     }
                 }
@@ -88,8 +130,14 @@ fun ConnectScreen(
                 android.widget.Toast.makeText(context, "Google Account is null", android.widget.Toast.LENGTH_SHORT).show()
             }
         } catch (e: ApiException) {
-            e.printStackTrace()
-            android.widget.Toast.makeText(context, "Sign In Failed (Code: ${e.statusCode})", android.widget.Toast.LENGTH_LONG).show()
+            android.util.Log.e("ConnectScreen", "Google Sign-In failed with status code ${e.statusCode}", e)
+            val friendlyMsg = when (e.statusCode) {
+                10 -> "Sign In Failed (Code 10: Developer Error). Add Play Store App Signing SHA-1 in Google Cloud Console, or enter Stream Key manually."
+                12500 -> "Sign In Failed (Code 12500). Please check Google Play Services."
+                12501 -> "Sign In cancelled."
+                else -> "Sign In Failed (Code: ${e.statusCode}): ${e.message}"
+            }
+            android.widget.Toast.makeText(context, friendlyMsg, android.widget.Toast.LENGTH_LONG).show()
         }
     }
 
@@ -117,7 +165,11 @@ fun ConnectScreen(
                     webChromeClient = android.webkit.WebChromeClient()
                     webViewClient = object : android.webkit.WebViewClient() {
                         private fun checkAndHandleRedirect(url: String): Boolean {
-                            if (url.startsWith(AppConfig.TWITCH_REDIRECT_URI) || url.startsWith("https://localhost")) {
+                            if (url.startsWith(AppConfig.TWITCH_REDIRECT_URI) ||
+                                url.startsWith("https://localhost") ||
+                                url.startsWith("com.streamtwin://") ||
+                                url.startsWith("streamtwin://")
+                            ) {
                                 val fragment = Uri.parse(url).fragment
                                 val token = fragment?.split("&")?.firstOrNull { it.startsWith("access_token=") }?.substringAfter("=")
                                 if (token != null) {
@@ -224,7 +276,7 @@ fun ConnectScreen(
             // YouTube Card
             PlatformCard(
                 name = "YouTube",
-                subtitle = "Streaming Hub",
+                subtitle = "Google OAuth or Manual RTMP",
                 icon = Icons.Outlined.SmartDisplay,
                 brandColor = YouTubeRed,
                 isConnected = isYouTubeConnected,
@@ -235,7 +287,8 @@ fun ConnectScreen(
                         .build()
                     val googleSignInClient = GoogleSignIn.getClient(context, gso)
                     googleSignInLauncher.launch(googleSignInClient.signInIntent)
-                }
+                },
+                onManualClick = { showYouTubeSheet = true }
             )
             Spacer(modifier = Modifier.height(12.dp))
 
@@ -375,6 +428,90 @@ fun ConnectScreen(
                 }
             }
         }
+
+        if (showYouTubeSheet) {
+            ModalBottomSheet(
+                onDismissRequest = { showYouTubeSheet = false },
+                sheetState = ytSheetState,
+                containerColor = SurfaceContainerLowest
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(24.dp)
+                ) {
+                    Text(
+                        text = "Connect to YouTube",
+                        fontFamily = Manrope,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 24.sp,
+                        color = OnSurface
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Enter your RTMP URL and Stream Key from YouTube Studio (youtube.com/live_dashboard)",
+                        fontFamily = Inter,
+                        fontSize = 14.sp,
+                        color = OnSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(24.dp))
+                    
+                    OutlinedTextField(
+                        value = youtubeUrl,
+                        onValueChange = { settingsViewModel.updateYoutubeUrl(it) },
+                        label = { Text("RTMP URL", color = OnSurfaceVariant) },
+                        placeholder = { Text("rtmp://a.rtmp.youtube.com/live2") },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = YouTubeRed,
+                            unfocusedBorderColor = OutlineVariant,
+                            focusedContainerColor = SurfaceContainerLow,
+                            unfocusedContainerColor = SurfaceContainerLow,
+                            focusedTextColor = OnSurface,
+                            unfocusedTextColor = OnSurface
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    OutlinedTextField(
+                        value = youtubeKey,
+                        onValueChange = { settingsViewModel.updateYoutubeKey(it) },
+                        label = { Text("Stream Key", color = OnSurfaceVariant) },
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = YouTubeRed,
+                            unfocusedBorderColor = OutlineVariant,
+                            focusedContainerColor = SurfaceContainerLow,
+                            unfocusedContainerColor = SurfaceContainerLow,
+                            focusedTextColor = OnSurface,
+                            unfocusedTextColor = OnSurface
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(32.dp))
+                    Button(
+                        onClick = {
+                            val effectiveUrl = youtubeUrl.ifBlank { "rtmp://a.rtmp.youtube.com/live2" }
+                            settingsViewModel.updateYoutubeUrl(effectiveUrl)
+                            settingsViewModel.setYoutubeEnabled(youtubeKey.isNotEmpty())
+                            settingsViewModel.saveSettings()
+                            mainViewModel.saveManualYouTubeKey(youtubeKey, effectiveUrl)
+                            coroutineScope.launch {
+                                ytSheetState.hide()
+                                showYouTubeSheet = false
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(56.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = YouTubeRed, contentColor = OnPrimary)
+                    ) {
+                        Text("SAVE YOUTUBE CONFIGURATION", fontFamily = Inter, fontWeight = FontWeight.Bold, letterSpacing = 0.05.em)
+                    }
+                    Spacer(modifier = Modifier.height(24.dp))
+                }
+            }
+        }
     }
 }
 
@@ -385,7 +522,8 @@ fun PlatformCard(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     brandColor: androidx.compose.ui.graphics.Color,
     isConnected: Boolean,
-    onConnectClick: () -> Unit
+    onConnectClick: () -> Unit,
+    onManualClick: (() -> Unit)? = null
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -447,18 +585,34 @@ fun PlatformCard(
                     )
                 }
             } else {
-                Button(
-                    onClick = onConnectClick,
-                    shape = RoundedCornerShape(8.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Primary, contentColor = OnPrimary),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
-                ) {
-                    Text(
-                        text = "Connect",
-                        fontFamily = Inter,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (onManualClick != null) {
+                        TextButton(
+                            onClick = onManualClick,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = "Manual",
+                                fontFamily = Inter,
+                                fontSize = 12.sp,
+                                color = OnSurfaceVariant
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(4.dp))
+                    }
+                    Button(
+                        onClick = onConnectClick,
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Primary, contentColor = OnPrimary),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                    ) {
+                        Text(
+                            text = "Connect",
+                            fontFamily = Inter,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
+                    }
                 }
             }
         }

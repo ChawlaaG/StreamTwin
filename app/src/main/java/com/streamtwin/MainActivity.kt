@@ -75,18 +75,16 @@ class MainActivity : ComponentActivity() {
 
         val uri = intent?.data ?: return
         
-        if (uri.scheme == "https" && uri.host == "localhost") {
+        if (uri.scheme == "com.streamtwin" || uri.scheme == "streamtwin" || (uri.scheme == "https" && uri.host == "localhost")) {
             // Implicit grant flow appends tokens as fragment, not query parameter
-            // e.g. https://localhost/streamtwin/callback#access_token=foo...
-            val fragment = uri.fragment ?: return
-            
-            // Parse fragment for access_token=...
-            val params = fragment.split("&").mapNotNull {
+            // e.g. com.streamtwin://callback#access_token=foo... or ?access_token=foo...
+            val fragment = uri.fragment
+            val params = fragment?.split("&")?.mapNotNull {
                 val parts = it.split("=")
                 if (parts.size == 2) parts[0] to parts[1] else null
-            }.toMap()
+            }?.toMap() ?: emptyMap()
             
-            val token = params["access_token"]
+            val token = params["access_token"] ?: uri.getQueryParameter("access_token")
             if (token != null) {
                 viewModel.handleTwitchAuthToken(token)
             }

@@ -34,13 +34,31 @@ class MainViewModel @Inject constructor(
     val isYouTubeConnected = streamDataStore.youtubeEnabledFlow
     val isKickConnected = streamDataStore.kickEnabledFlow
 
-    fun handleYouTubeAuthToken(token: String) {
+    fun handleYouTubeAuthToken(token: String, email: String = "") {
         viewModelScope.launch {
             secureStorageManager.youtubeAccessToken = token
+            if (email.isNotEmpty()) {
+                secureStorageManager.googleAccountEmail = email
+            }
             // Auto-enable YouTube since user just signed in with Google
             streamDataStore.saveYoutubeEnabled(true)
             // If Twitch isn't already authenticated, disable it so it doesn't
             // appear as an enabled-but-unconfigured destination
+            val hasTwitchToken = !securePrefs.getAccessToken().isNullOrEmpty()
+            if (!hasTwitchToken) {
+                streamDataStore.saveTwitchEnabled(false)
+            }
+            _authSuccess.emit(true)
+        }
+    }
+
+    fun saveManualYouTubeKey(key: String, rtmpUrl: String = "") {
+        viewModelScope.launch {
+            secureStorageManager.youtubeStreamKey = key
+            if (rtmpUrl.isNotEmpty()) {
+                secureStorageManager.youtubeRtmpUrl = rtmpUrl
+            }
+            streamDataStore.saveYoutubeEnabled(key.isNotEmpty())
             val hasTwitchToken = !securePrefs.getAccessToken().isNullOrEmpty()
             if (!hasTwitchToken) {
                 streamDataStore.saveTwitchEnabled(false)

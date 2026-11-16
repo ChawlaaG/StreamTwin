@@ -236,7 +236,30 @@ class StreamingService : Service() {
             
             var youtubeKey = ""
             if (youtubeEnabled) {
-                val token = secureStorageManager.youtubeAccessToken
+                var token = secureStorageManager.youtubeAccessToken
+                val email = secureStorageManager.googleAccountEmail
+                
+                // Refresh token via GoogleAuthUtil if an account is registered
+                if (email.isNotEmpty()) {
+                    try {
+                        val freshToken = withContext(Dispatchers.IO) {
+                            com.google.android.gms.auth.GoogleAuthUtil.getToken(
+                                applicationContext,
+                                android.accounts.Account(email, "com.google"),
+                                "oauth2:https://www.googleapis.com/auth/youtube.force-ssl"
+                            )
+                        }
+                        if (!freshToken.isNullOrBlank()) {
+                            token = freshToken
+                            secureStorageManager.youtubeAccessToken = freshToken
+                            Log.d(TAG, "Refreshed YouTube access token via GoogleAuthUtil")
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Token refresh via GoogleAuthUtil skipped/failed: ${e.message}")
+                    }
+                }
+
+                var fetchedFromApi = false
                 if (token.isNotEmpty()) {
                     Log.d(TAG, "Fetching YouTube Stream Key and Creating Broadcast...")
                     val streamData = youtubeApiManager.fetchStreamKey(token)
@@ -246,18 +269,32 @@ class StreamingService : Service() {
                         youtubeKey = streamData.second.second
                         youtubeStreamKeyDynamic = youtubeKey // Store for secondary/retry use
                         
-                        val title = streamDataStore.streamTitleFlow.first()
+                        val title = streamDataStore.streamTitleFlow.first().ifBlank { "StreamTwin Live Stream" }
                         val categoryField = streamDataStore.selectedGameNameFlow.first()
                         val category = if (categoryField.isEmpty()) "Gaming" else categoryField
                         
                         youtubeBroadcastId = youtubeApiManager.createAndBindBroadcast(token, title, category, streamId)
                         Log.d(TAG, "YouTube Broadcast ID: $youtubeBroadcastId")
+                        fetchedFromApi = true
                     } else {
-                        Log.e(TAG, "Failed to fetch YouTube stream data")
-                        StreamStateManager.updateDestinationStatus("YOUTUBE", StreamStateManager.ConnectionStatus.FAILED)
-                        // If YouTube was the only destination, we map to Twitch failed fallback later,
-                        // but setting status here helps UI.
+                        Log.e(TAG, "Failed to fetch YouTube stream data from API")
                     }
+                }
+
+                // Fallback to manual stream key if API retrieval failed or wasn't configured
+                if (!fetchedFromApi && youtubeKey.isEmpty()) {
+                    val manualKey = secureStorageManager.youtubeStreamKey
+                    if (manualKey.isNotEmpty()) {
+                        youtubeKey = manualKey
+                        youtubeRtmpUrl = secureStorageManager.youtubeRtmpUrl.ifEmpty { "rtmp://a.rtmp.youtube.com/live2" }
+                        youtubeStreamKeyDynamic = youtubeKey
+                        Log.d(TAG, "Using manual YouTube stream key fallback.")
+                    }
+                }
+
+                if (youtubeKey.isEmpty()) {
+                    Log.e(TAG, "YouTube is enabled but neither API broadcast nor manual stream key is available")
+                    StreamStateManager.updateDestinationStatus("YOUTUBE", StreamStateManager.ConnectionStatus.FAILED)
                 }
             }
 
@@ -371,10 +408,11 @@ class StreamingService : Service() {
                     }
 
                     // ── Register secondary destinations ───────
+                    val ytBaseUrl = youtubeRtmpUrl.ifEmpty { "rtmp://a.rtmp.youtube.com/live2" }
                     secondaryPlatforms.forEach { platform ->
                         val url = when (platform) {
-                            "YOUTUBE" -> "$youtubeRtmpUrl/$youtubeKey"
-                            "KICK" -> "$kickUrl/$kickKey"
+                            "YOUTUBE" -> if (youtubeKey.isNotEmpty()) "$ytBaseUrl/$youtubeKey" else ""
+                            "KICK" -> if (kickKey.isNotEmpty() && kickUrl.isNotEmpty()) "$kickUrl/$kickKey" else ""
                             else -> ""
                         }
                         if (url.isNotEmpty()) {
@@ -386,10 +424,15 @@ class StreamingService : Service() {
 
                     // ── Start primary stream ────────────────────
                     val masterUrl = when (primaryPlatform) {
-                        "TWITCH" -> "${AppConfig.RTMP_BASE_URL}$twitchKey"
-                        "YOUTUBE" -> "rtmp://a.rtmp.youtube.com/live2/$youtubeKey"
-                        "KICK" -> "$kickUrl/$kickKey"
+                        "TWITCH" -> if (twitchKey.isNotEmpty()) "${AppConfig.RTMP_BASE_URL}$twitchKey" else ""
+                        "YOUTUBE" -> if (youtubeKey.isNotEmpty()) "$ytBaseUrl/$youtubeKey" else ""
+                        "KICK" -> if (kickKey.isNotEmpty() && kickUrl.isNotEmpty()) "$kickUrl/$kickKey" else ""
                         else -> ""
+                    }
+                    if (masterUrl.isEmpty()) {
+                        Log.e(TAG, "Master URL is empty for primary platform $primaryPlatform")
+                        StreamStateManager.updateDestinationStatus(primaryPlatform, StreamStateManager.ConnectionStatus.FAILED)
+                        return@withContext
                     }
                     val maskedUrl = if (masterUrl.length > 30) masterUrl.take(30) + "..." else masterUrl
                     Log.d(TAG, "Master URL for $primaryPlatform: $maskedUrl")
@@ -416,10 +459,11 @@ class StreamingService : Service() {
         val kickKey = secureStorageManager.kickStreamKey
         val kickUrl = secureStorageManager.kickRtmpUrl
 
+        val ytBaseUrl = youtubeRtmpUrl.ifEmpty { "rtmp://a.rtmp.youtube.com/live2" }
         secondaryPlatforms.forEach { platform ->
             val url = when (platform) {
-                "YOUTUBE" -> "rtmp://a.rtmp.youtube.com/live2/$youtubeKey"
-                "KICK" -> "$kickUrl/$kickKey"
+                "YOUTUBE" -> if (youtubeKey.isNotEmpty()) "$ytBaseUrl/$youtubeKey" else ""
+                "KICK" -> if (kickKey.isNotEmpty() && kickUrl.isNotEmpty()) "$kickUrl/$kickKey" else ""
                 else -> ""
             }
             if (url.isNotEmpty()) {
@@ -450,7 +494,8 @@ class StreamingService : Service() {
                 if (primaryPlatform == "YOUTUBE") {
                     Log.d(TAG, "YouTube: Retrying as Primary")
                     if (youtubeStreamKeyDynamic.isNotEmpty()) {
-                        val url = "$youtubeRtmpUrl/$youtubeStreamKeyDynamic"
+                        val ytBaseUrl = youtubeRtmpUrl.ifEmpty { "rtmp://a.rtmp.youtube.com/live2" }
+                        val url = "$ytBaseUrl/$youtubeStreamKeyDynamic"
                         masterDisplay?.startStream(url)
                     }
                 } else {

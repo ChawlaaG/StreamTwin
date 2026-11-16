@@ -42,7 +42,26 @@ class YouTubeChatService : Service() {
         isPolling = true
         
         serviceScope.launch {
-            val token = secureStorageManager.youtubeAccessToken
+            var token = secureStorageManager.youtubeAccessToken
+            val email = secureStorageManager.googleAccountEmail
+            if (email.isNotEmpty()) {
+                try {
+                    val freshToken = withContext(Dispatchers.IO) {
+                        com.google.android.gms.auth.GoogleAuthUtil.getToken(
+                            applicationContext,
+                            android.accounts.Account(email, "com.google"),
+                            "oauth2:https://www.googleapis.com/auth/youtube.force-ssl"
+                        )
+                    }
+                    if (!freshToken.isNullOrBlank()) {
+                        token = freshToken
+                        secureStorageManager.youtubeAccessToken = freshToken
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Chat token refresh skipped/failed: ${e.message}")
+                }
+            }
+
             if (token.isEmpty()) {
                 Log.e(TAG, "No YouTube Access Token found. Cannot start chat.")
                 isPolling = false
@@ -114,7 +133,7 @@ class YouTubeChatService : Service() {
                     
                     // Recommended interval provided by API
                     pollingInterval = jsonObject.optLong("pollingIntervalMillis", 5000L)
-                    nextPageToken = jsonObject.optString("nextPageToken", null)
+                    nextPageToken = jsonObject.optString("nextPageToken").ifEmpty { null }
                     
                     val items = jsonObject.optJSONArray("items")
                     if (items != null) {
